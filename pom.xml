@@ -797,12 +797,12 @@
                 <version>${hamcrest.version}</version>
                 <scope>test</scope>
             </dependency>
-            <dependency>
+            <!-- <dependency>
                 <groupId>org.valid4j</groupId>
                 <artifactId>json-path-matchers</artifactId>
                 <version>${valid4j.version}</version>
                 <scope>test</scope>
-            </dependency>
+            </dependency> -->
             <dependency>
                 <groupId>org.hamcrest</groupId>
                 <artifactId>hamcrest</artifactId>
@@ -868,12 +868,12 @@
                 <artifactId>junit</artifactId>
                 <version>${junit4.version}</version>
             </dependency>
-            <dependency>
+            <!-- <dependency>
                 <groupId>io.skodjob</groupId>
                 <artifactId>test-docs-generator-maven-plugin</artifactId>
                 <version>${skodjob-doc.version}</version>
                 <scope>test</scope>
-            </dependency>
+            </dependency> -->
         </dependencies>
     </dependencyManagement>
 

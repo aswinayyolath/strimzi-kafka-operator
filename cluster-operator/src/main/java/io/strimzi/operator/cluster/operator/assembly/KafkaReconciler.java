@@ -9,8 +9,12 @@ import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.rbac.ClusterRoleBinding;
+import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.strimzi.api.kafka.model.common.Condition;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
@@ -30,6 +34,7 @@ import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolStatus;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolStatusBuilder;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
 import io.strimzi.api.kafka.model.podset.StrimziPodSetBuilder;
+import io.strimzi.operator.cluster.ClusterInfo;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.model.CertUtils;
@@ -88,6 +93,7 @@ import org.apache.kafka.common.KafkaException;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -171,6 +177,8 @@ public class KafkaReconciler {
 
     private final KafkaAutoRebalanceStatus kafkaAutoRebalanceStatus;
 
+    private Map<String, ClusterInfo> getK8sClusters;
+
     /**
      * Constructs the Kafka reconciler
      *
@@ -241,6 +249,7 @@ public class KafkaReconciler {
         this.adminClientProvider = supplier.adminClientProvider;
         this.kafkaAgentClientProvider = supplier.kafkaAgentClientProvider;
         this.continueOnManualRUFailure = config.featureGates().continueOnManualRUFailureEnabled();
+        this.getK8sClusters = config.getK8sClusters();
     }
 
     /**
@@ -524,13 +533,75 @@ public class KafkaReconciler {
     /**
      * Manages the Kafka service account
      *
-     * @return  Completes when the service account was successfully created or updated
+     * @return Completes when the service account was successfully created or updated
      */
     protected Future<Void> serviceAccount() {
-        return serviceAccountOperator
-                .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaComponentName(reconciliation.name()), kafka.generateServiceAccount())
+        ServiceAccount serviceAccount = kafka.generateServiceAccount();
+
+        // Reconcile the ServiceAccount in the Central Cluster
+        Future<Void> centralClusterSa = serviceAccountOperator
+                .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaComponentName(reconciliation.name()), serviceAccount)
                 .map((Void) null);
+
+        // Check if STRIMZI_STRETCH_MODE is enabled and the KafkaNodePool defines a remote cluster
+        if (Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE"))) {
+            ServiceAccount saWithoutOwnerRef = kafka.generateServiceAccount(true);
+            // Loop through all KafkaNodePools to find any with a cluster field
+            List<KafkaPool> kafkaNodePools = kafka.getNodePools();
+            List<Future<Void>> remoteClusterSaFutures = kafkaNodePools.stream()
+                    .filter(pool -> pool.getTargetCluster() != null) // Filter for pools with a remote cluster
+                    .map(pool -> createServiceAccountInRemoteCluster(pool.getTargetCluster(), saWithoutOwnerRef))
+                    .toList();
+
+            // Combine all futures (Central + Remote Clusters)
+            return Future.join(centralClusterSa, Future.join(remoteClusterSaFutures)).compose(ignore -> Future.succeededFuture());
+
+        }
+
+        // Return only the central cluster SA future if STRIMZI_STRETCH_MODE is disabled
+        return centralClusterSa;
     }
+
+    /**
+     * Creates the ServiceAccount in a remote cluster.
+     *
+     * @param targetCluster  Name of the target cluster
+     * @param serviceAccount ServiceAccount to create
+     * @return               A Future which completes when the ServiceAccount is successfully created
+     */
+    private Future<Void> createServiceAccountInRemoteCluster(String targetCluster, ServiceAccount serviceAccount) {
+        ClusterInfo clusterInfo = getK8sClusters.get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return Future.succeededFuture(); // Skip this cluster
+        }
+
+        try {
+            // Fetch the kubeconfig from the Kubernetes Secret
+            Secret secret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (secret == null) {
+                LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(secret.getData().get("kubeconfig")));
+
+            // Create a Kubernetes client for the remote cluster
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Reconcile the ServiceAccount in the remote cluster
+            remoteClient.resource(serviceAccount).create();
+            LOGGER.infoOp("Successfully created ServiceAccount {} in remote cluster {}", serviceAccount.getMetadata().getName(), targetCluster);
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to create ServiceAccount {} in remote cluster {}", serviceAccount.getMetadata().getName(), targetCluster, e);
+            return Future.failedFuture(e);
+        }
+    }
+
 
     /**
      * Manages the Kafka cluster role binding. When the desired Cluster Role Binding is null, and we get an RBAC error,

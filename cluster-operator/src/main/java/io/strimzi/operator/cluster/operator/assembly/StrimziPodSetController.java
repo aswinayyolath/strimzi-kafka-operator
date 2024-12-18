@@ -72,6 +72,7 @@ public class StrimziPodSetController implements Runnable {
 
     private final PodOperator podOperator;
     private final StrimziPodSetOperator strimziPodSetOperator;
+    private final boolean stretchMode;
     private final ControllerMetricsHolder metrics;
     private final LabelSelector crSelector;
     private final String watchedNamespace;
@@ -103,6 +104,7 @@ public class StrimziPodSetController implements Runnable {
      * @param podOperator                   Pod operator for managing pods
      * @param metricsProvider               Metrics provider
      * @param podSetControllerWorkQueueSize Indicates the size of the StrimziPodSetController work queue
+     * @param stretchMode                   Indicates if the Cluster is Running in StretchMode
      */
     public StrimziPodSetController(
             String watchedNamespace,
@@ -113,10 +115,12 @@ public class StrimziPodSetController implements Runnable {
             StrimziPodSetOperator strimziPodSetOperator,
             PodOperator podOperator,
             MetricsProvider metricsProvider,
-            int podSetControllerWorkQueueSize
+            int podSetControllerWorkQueueSize,
+            boolean stretchMode
     ) {
         this.podOperator = podOperator;
         this.strimziPodSetOperator = strimziPodSetOperator;
+        this.stretchMode = stretchMode;
         this.crSelector = (crSelectorLabels == null || crSelectorLabels.toMap().isEmpty()) ? null : new LabelSelector(null, crSelectorLabels.toMap());
         this.watchedNamespace = watchedNamespace;
         this.workQueue = new ArrayBlockingQueue<>(podSetControllerWorkQueueSize);
@@ -303,6 +307,9 @@ public class StrimziPodSetController implements Runnable {
      * @return          True if the StrimziPodSet's Kafka cluster matches the selector labels
      */
     private boolean matchesCrSelector(StrimziPodSet podSet)    {
+        if (stretchMode) {
+            return true;
+        }
         if (podSet.getMetadata().getLabels() != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_KIND_LABEL) != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_CLUSTER_LABEL) != null) {
@@ -323,6 +330,10 @@ public class StrimziPodSetController implements Runnable {
     }
 
     private HasMetadata findCustomResource(StrimziPodSet podSet)    {
+        if (stretchMode) {
+            return null;
+        }
+
         String customResourceName = podSet.getMetadata().getLabels().get(Labels.STRIMZI_CLUSTER_LABEL);
         HasMetadata cr = null;
 

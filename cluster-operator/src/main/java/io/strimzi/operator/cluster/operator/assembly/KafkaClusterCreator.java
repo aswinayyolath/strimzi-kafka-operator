@@ -47,6 +47,8 @@ public class KafkaClusterCreator {
     // Settings
     private final Reconciliation reconciliation;
     private final KafkaVersion.Lookup versions;
+    private final ClusterOperatorConfig config;
+    private final ResourceOperatorSupplier supplier;
 
     // Operators and other tools
     private final Vertx vertx;
@@ -80,12 +82,14 @@ public class KafkaClusterCreator {
         this.reconciliation = reconciliation;
         this.versions = config.versions();
         this.kafkaMetadataConfigState = kafkaMetadataConfigState;
+        this.config = config;
 
         this.vertx = vertx;
         this.adminClientProvider = supplier.adminClientProvider;
         this.secretOperator = supplier.secretOperations;
         this.sharedEnvironmentProvider = supplier.sharedEnvironmentProvider;
         this.brokerScaleDownOperations = supplier.brokersInUseCheck;
+        this.supplier = supplier;
     }
 
     /**
@@ -173,7 +177,7 @@ public class KafkaClusterCreator {
             Map<String, List<String>> currentPods,
             KafkaVersionChange versionChange
     )   {
-        return Future.succeededFuture(createKafkaCluster(reconciliation, kafkaCr, nodePoolCrs, oldStorage, currentPods, versionChange, kafkaMetadataConfigState, versions, sharedEnvironmentProvider));
+        return Future.succeededFuture(createKafkaCluster(reconciliation, kafkaCr, nodePoolCrs, oldStorage, currentPods, versionChange, kafkaMetadataConfigState, versions, sharedEnvironmentProvider, config, supplier));
     }
 
     /**
@@ -346,6 +350,8 @@ public class KafkaClusterCreator {
      * @param kafkaMetadataConfigState      Metadata state related to nodes configuration
      * @param versions                      List of supported Kafka versions
      * @param sharedEnvironmentProvider     Shared environment variables
+     * @param clusterOperatorConfig         ClusterOperatorConfig instance
+     * @param supplier                      supplier Instance
      *
      * @return  New KafkaCluster object
      */
@@ -358,14 +364,16 @@ public class KafkaClusterCreator {
             KafkaVersionChange versionChange,
             KafkaMetadataConfigurationState kafkaMetadataConfigState,
             KafkaVersion.Lookup versions,
-            SharedEnvironmentProvider sharedEnvironmentProvider
+            SharedEnvironmentProvider sharedEnvironmentProvider,
+            ClusterOperatorConfig clusterOperatorConfig,
+            ResourceOperatorSupplier supplier
     ) {
         // We prepare the KafkaPool models and create the KafkaCluster model
         // KRaft to be considered not only when fully enabled (KRAFT = 4) but also when a migration is about to start (PRE_MIGRATION = 1)
         // NOTE: this is important to drive the right validation happening in node pools (i.e. roles on node pools, storage, number of controllers, ...)
         List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePoolCrs, oldStorage, currentPods, versionChange, kafkaMetadataConfigState.isPreMigrationToKRaft(), sharedEnvironmentProvider);
         String clusterId = kafkaMetadataConfigState.isPreMigrationToKRaft() ? NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs) : NodePoolUtils.getClusterIdIfSet(kafkaCr, nodePoolCrs);
-        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, versionChange, kafkaMetadataConfigState, clusterId, sharedEnvironmentProvider);
+        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, versionChange, kafkaMetadataConfigState, clusterId, sharedEnvironmentProvider, clusterOperatorConfig, supplier);
     }
 
     /**

@@ -150,6 +150,8 @@ public class ClusterOperator extends AbstractVerticle {
     private Future<Void> maybeStartStrimziPodSetController() {
         return vertx.executeBlocking(() -> {
             try {
+                boolean stretchMode = config.isStretchMode();
+                LOGGER.info("--Stretch Mode value in ClusterOperator-- {}", stretchMode);
                 strimziPodSetController = new StrimziPodSetController(
                         namespace,
                         config.getCustomResourceSelector(),
@@ -159,7 +161,8 @@ public class ClusterOperator extends AbstractVerticle {
                         resourceOperatorSupplier.strimziPodSetOperator,
                         resourceOperatorSupplier.podOperations,
                         resourceOperatorSupplier.metricsProvider,
-                        config.getPodSetControllerWorkQueueSize()
+                        config.getPodSetControllerWorkQueueSize(),
+                        stretchMode
                 );
                 strimziPodSetController.start();
                 return null;

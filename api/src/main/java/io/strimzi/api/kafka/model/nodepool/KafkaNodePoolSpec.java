@@ -29,11 +29,16 @@ import java.util.List;
         builderPackage = Constants.FABRIC8_KUBERNETES_API
 )
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonPropertyOrder({"replicas", "storage", "roles", "resources", "jvmOptions", "template"})
+@JsonPropertyOrder({"replicas", "cluster", "storage", "roles", "resources", "jvmOptions", "template"})
 @EqualsAndHashCode(callSuper = true)
 @ToString(callSuper = true)
 public class KafkaNodePoolSpec extends Spec {
     private int replicas;
+
+    @Description("The target Kubernetes cluster where the resources for this node pool will be created.")
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private String cluster;
+
     private Storage storage;
     private List<ProcessRoles> roles;
     private ResourceRequirements resources;
@@ -50,6 +55,17 @@ public class KafkaNodePoolSpec extends Spec {
     public void setReplicas(int replicas) {
         this.replicas = replicas;
     }
+
+    @Description("Target Kubernetes Cluster where SPS will be created.")
+    public String getCluster() {
+        return cluster;
+    }
+
+    public void setCluster(String cluster) {
+        this.cluster = cluster;
+    }
+
+
 
     @Description("Storage configuration (disk). Cannot be updated.")
     @JsonProperty(required = true)

@@ -51,6 +51,14 @@ We also control imports only in production classes and not in tests. This is con
         <!-- This enforces the layering between the Strimzi Model and Operator classes in the Cluster Operator. The Model classes are not allowed
         to import from Operator classes. They should only use the API classes -->
 
+        <!-- For Stretch Cluster -->
+        <allow class="io.fabric8.kubernetes.client.Config" />
+        <allow class="io.fabric8.kubernetes.client.KubernetesClient" />
+        <allow class="io.fabric8.kubernetes.client.KubernetesClientBuilder" />
+        <allow class="io.strimzi.operator.cluster.ClusterInfo" />
+        <allow class="io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier" />
+        <allow class="io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator" />
+
         <!-- Common libraries and Java classes -->
         <allow pkg="java" />
         <allow pkg="org.apache.kafka" />
