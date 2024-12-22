@@ -1318,4 +1318,16 @@ public class KafkaReconciler {
             return Future.succeededFuture();
         }
     }
+
+    /**
+     * Returns the {@link KafkaCluster} instance associated with this reconciler.
+     *
+     * The {@link KafkaCluster} instance represents the current state of the Kafka cluster being reconciled,
+     * including details about broker nodes, storage configuration, and associated node pools.
+     *
+     * @return The {@link KafkaCluster} instance representing the Kafka cluster, or {@code null} if it is not initialized.
+     */
+    public KafkaCluster getKafkaCluster() {
+        return this.kafka;
+    }
 }

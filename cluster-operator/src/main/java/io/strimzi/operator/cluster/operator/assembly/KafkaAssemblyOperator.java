@@ -31,6 +31,7 @@ import io.strimzi.operator.cluster.model.ClusterCa;
 import io.strimzi.operator.cluster.model.KRaftUtils;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaMetadataConfigurationState;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.KafkaVersionChange;
 import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
@@ -271,9 +272,9 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         // inter broker protocol and log message format via the version change component
         reconcileState.initialStatus()
                 // Preparation steps => prepare cluster descriptions, handle CA creation or changes
+                .compose(state -> state.versionChange(kafkaMetadataConfigState.isKRaft()))
                 .compose(state -> state.reconcileCas(clock))
                 .compose(state -> state.emitCertificateSecretMetrics())
-                .compose(state -> state.versionChange(kafkaMetadataConfigState.isKRaft()))
 
                 // Run reconciliations of the different components
                 .compose(state -> kafkaMetadataConfigState.isKRaft() ? Future.succeededFuture(state) : state.reconcileZooKeeper(clock))
@@ -471,8 +472,28 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          *
          * @return  CaReconciler instance
          */
-        CaReconciler caReconciler()   {
-            return new CaReconciler(reconciliation, kafkaAssembly, config, supplier, vertx, certManager, passwordGenerator);
+        CaReconciler caReconciler(KafkaCluster kafkaCluster) {
+            LOGGER.debugCr(reconciliation, "Creating CaReconciler for Kafka cluster {}", reconciliation.name());
+
+            // Extract nodePools from the prepared KafkaCluster
+            List<KafkaPool> nodePools = kafkaCluster.getNodePools();
+            if (nodePools == null) {
+                LOGGER.warnCr(reconciliation, "No node pools found for Kafka cluster {}", reconciliation.name());
+                nodePools = List.of(); // Fallback to an empty list
+            }
+
+            LOGGER.debugCr(reconciliation, "Passing {} node pools to CaReconciler for Kafka cluster {}", nodePools.size(), reconciliation.name());
+
+            return new CaReconciler(
+                reconciliation,
+                kafkaAssembly,
+                nodePools,
+                config,
+                supplier,
+                vertx,
+                certManager,
+                passwordGenerator
+            );
         }
 
         /**
@@ -485,13 +506,40 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          * @return  Future with Reconciliation State
          */
         Future<ReconciliationState> reconcileCas(Clock clock)    {
-            return caReconciler()
-                    .reconcile(clock)
-                    .compose(cas -> {
-                        this.clusterCa = cas.clusterCa();
-                        this.clientsCa = cas.clientsCa();
-                        return Future.succeededFuture(this);
-                    });
+            return kafkaReconciler()
+                .compose(reconciler -> {
+                    // Fetch the prepared KafkaCluster
+                    KafkaCluster kafkaCluster = reconciler.getKafkaCluster();
+
+                    // Create and use CaReconciler
+                    CaReconciler caReconciler = caReconciler(kafkaCluster);
+
+                    return caReconciler.reconcile(clock)
+                        .compose(caReconcilerResult -> { // Renamed for clarity
+                            if (caReconcilerResult == null) {
+                                LOGGER.errorCr(reconciliation, "CaReconciler.reconcile() returned null.");
+                                return Future.failedFuture("CaReconciler.reconcile() returned null"); // Fail the future
+                            }
+
+                            this.clusterCa = caReconcilerResult.clusterCa();
+                            this.clientsCa = caReconcilerResult.clientsCa();
+
+                            if (this.clusterCa == null) {
+                                LOGGER.errorCr(reconciliation, "Cluster CA is null after CaReconciler.reconcile().");
+                                return Future.failedFuture("Cluster CA is null after CaReconciler.reconcile()"); // Fail the future
+                            }
+                            if (this.clientsCa == null) {
+                                LOGGER.errorCr(reconciliation, "Clients CA is null after CaReconciler.reconcile().");
+                                return Future.failedFuture("Clients CA is null after CaReconciler.reconcile()"); // Fail the future
+                            }
+
+                            return Future.succeededFuture(this);
+                        });
+                })
+                .compose(state -> {
+                    LOGGER.debugCr(reconciliation, "Proceeding with reconciliation of Kafka cluster {}", reconciliation.name());
+                    return Future.succeededFuture(this); // Continue with the pipeline
+                });
         }
 
         /**
@@ -500,6 +548,19 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          * @return  Future with Reconciliation State
          */
         Future<ReconciliationState> emitCertificateSecretMetrics() {
+            // Revisit below conditions later, for now we'll live with it
+            // This additional Safeguards were addedd to protect against Pipeline failure
+            // And improved debugging... I will revist it later and remove thif not really required
+            if (this.clusterCa == null) {
+                LOGGER.errorCr(reconciliation, "Cannot emit certificate metrics: clusterCa is null.");
+                throw new IllegalStateException("clusterCa is null. Ensure CaReconciler.reconcile() was called and completed successfully.");
+            }
+
+            if (this.clientsCa == null) {
+                LOGGER.errorCr(reconciliation, "Cannot emit certificate metrics: clientsCa is null.");
+                throw new IllegalStateException("clientsCa is null. Ensure CaReconciler.reconcile() was called and completed successfully.");
+            }
+
             long serverCertificateExpiration = this.clusterCa.getCertificateExpirationDateEpoch();
             metrics.clusterCaCertificateExpiration(this.name, this.namespace).set(serverCertificateExpiration);
 

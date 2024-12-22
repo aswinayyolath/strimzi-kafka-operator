@@ -9,6 +9,10 @@ import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.api.model.SecretBuilder;
+import io.fabric8.kubernetes.client.Config;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.strimzi.api.kafka.model.common.CertificateAuthority;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
@@ -16,10 +20,12 @@ import io.strimzi.api.kafka.model.kafka.cruisecontrol.CruiseControlResources;
 import io.strimzi.api.kafka.model.kafka.exporter.KafkaExporterResources;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
 import io.strimzi.certs.CertManager;
+import io.strimzi.operator.cluster.ClusterInfo;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.model.AbstractModel;
 import io.strimzi.operator.cluster.model.CertUtils;
 import io.strimzi.operator.cluster.model.ClusterCa;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.model.RestartReason;
@@ -50,16 +56,18 @@ import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.PasswordGenerator;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.vertx.core.Future;
-import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 /**
  * Class used for reconciliation of Cluster and Client CAs. This class contains both the steps of the CA reconciliation
@@ -98,14 +106,19 @@ public class CaReconciler {
     private ClientsCa clientsCa;
     private Secret coSecret;
 
+    private final List<KafkaPool> nodePools;
+
     /* test */ boolean isClusterCaNeedFullTrust;
     /* test */ boolean isClusterCaFullyUsed;
+
+    private Map<String, ClusterInfo> getK8sClusters;
 
     /**
      * Constructs the CA reconciler which reconciles the Cluster and Client CAs
      *
      * @param reconciliation    Reconciliation marker
      * @param kafkaCr           The Kafka custom resource
+     * @param nodePools         The list of KafkaPools
      * @param config            Cluster Operator Configuration
      * @param supplier          Supplier with Kubernetes Resource Operators
      * @param vertx             Vert.x instance
@@ -115,6 +128,7 @@ public class CaReconciler {
     public CaReconciler(
             Reconciliation reconciliation,
             Kafka kafkaCr,
+            List<KafkaPool> nodePools,
             ClusterOperatorConfig config,
             ResourceOperatorSupplier supplier,
             Vertx vertx,
@@ -154,6 +168,8 @@ public class CaReconciler {
         this.clusterOperatorSecretLabels = Labels.generateDefaultLabels(kafkaCr, Labels.APPLICATION_NAME, Labels.APPLICATION_NAME, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
         this.clusterCaCertLabels = clusterCaCertLabels(kafkaCr);
         this.clusterCaCertAnnotations = clusterCaCertAnnotations(kafkaCr);
+        this.getK8sClusters = config.getK8sClusters();
+        this.nodePools = nodePools;
     }
 
     /**
@@ -292,33 +308,104 @@ public class CaReconciler {
 
                     return null;
                 }))
-                .compose(i -> {
-                    Promise<Void> caUpdatePromise = Promise.promise();
-
-                    List<Future<ReconcileResult<Secret>>> secretReconciliations = new ArrayList<>(2);
-
-                    if (clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority())   {
-                        Future<ReconcileResult<Secret>> clusterSecretReconciliation = secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCa.caCertSecret())
-                                .compose(ignored -> secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaKeyName, clusterCa.caKeySecret()));
-                        secretReconciliations.add(clusterSecretReconciliation);
-                    }
-
-                    if (clientsCaConfig == null || clientsCaConfig.isGenerateCertificateAuthority())   {
-                        Future<ReconcileResult<Secret>> clientsSecretReconciliation = secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaCertName, clientsCa.caCertSecret())
-                                .compose(ignored -> secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaKeyName, clientsCa.caKeySecret()));
-                        secretReconciliations.add(clientsSecretReconciliation);
-                    }
-
-                    Future.join(secretReconciliations).onComplete(res -> {
-                        if (res.succeeded())    {
-                            caUpdatePromise.complete();
-                        } else {
-                            caUpdatePromise.fail(res.cause());
-                        }
-                    });
-
-                    return caUpdatePromise.future();
+                .compose(ignore -> {
+                    // Reconcile Secrets in the central cluster
+                    return reconcileCaSecretsInCentralCluster(clusterCaCertName, clusterCaKeyName, clientsCaCertName, clientsCaKeyName);
+                })
+                .compose(ignore -> {
+                    // Reconcile Secrets in remote clusters if stretch mode is enabled
+                    return reconcileCaSecretsInRemoteClusters(clusterCaCertName, clusterCaKeyName, clientsCaCertName, clientsCaKeyName);
                 });
+    }
+
+    private Future<Void> reconcileCaSecretsInCentralCluster(String clusterCaCertName, String clusterCaKeyName, String clientsCaCertName, String clientsCaKeyName) {
+        List<Future<ReconcileResult<Secret>>> secretReconciliations = new ArrayList<>();
+
+        if (clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority()) {
+            secretReconciliations.add(secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCa.caCertSecret()));
+            secretReconciliations.add(secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaKeyName, clusterCa.caKeySecret()));
+        }
+
+        if (clientsCaConfig == null || clientsCaConfig.isGenerateCertificateAuthority()) {
+            secretReconciliations.add(secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaCertName, clientsCa.caCertSecret()));
+            secretReconciliations.add(secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaKeyName, clientsCa.caKeySecret()));
+        }
+
+        return Future.join(secretReconciliations).map((Void) null);
+    }
+
+    private Future<Void> reconcileCaSecretsInRemoteClusters(String clusterCaCertName, String clusterCaKeyName, String clientsCaCertName, String clientsCaKeyName) {
+        if (!Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE"))) {
+            return Future.succeededFuture();
+        }
+
+        if (nodePools == null || nodePools.isEmpty()) {
+            LOGGER.warnCr(reconciliation, "No KafkaNodePools found. Skipping CA reconciliation for remote clusters.");
+            return Future.succeededFuture();
+        }
+
+        List<Future<Void>> remoteClusterFutures = nodePools.stream()
+            .filter(pool -> pool.getTargetCluster() != null) // Only handle pools with a remote cluster defined
+            .flatMap(pool -> Stream.of(
+                applySecretToRemoteCluster(pool.getTargetCluster(), clusterCa.caCertSecret(), clusterCaCertName),
+                applySecretToRemoteCluster(pool.getTargetCluster(), clusterCa.caKeySecret(), clusterCaKeyName),
+                applySecretToRemoteCluster(pool.getTargetCluster(), clientsCa.caCertSecret(), clientsCaCertName),
+                applySecretToRemoteCluster(pool.getTargetCluster(), clientsCa.caKeySecret(), clientsCaKeyName)
+            ))
+            .toList();
+
+        return Future.join(remoteClusterFutures).map((Void) null);
+    }
+
+    private Future<Void> applySecretToRemoteCluster(String targetCluster, Secret secret, String secretName) {
+        ClusterInfo clusterInfo = getK8sClusters.get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return Future.succeededFuture(); // Skip this cluster
+        }
+
+        try {
+            // Fetch the kubeconfig from the Kubernetes Secret
+            Secret kubeconfigSecret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (kubeconfigSecret == null) {
+                LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(kubeconfigSecret.getData().get("kubeconfig")));
+
+            // Create a Kubernetes client for the remote cluster
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Check if the Secret already exists in the remote cluster
+            Secret existingSecret = remoteClient.secrets()
+                .inNamespace(secret.getMetadata().getNamespace())
+                .withName(secretName)
+                .get();
+
+            if (existingSecret != null) {
+                LOGGER.infoOp("Secret {} already exists in remote cluster {}", secretName, targetCluster);
+                return Future.succeededFuture(); // Skip creation
+            }
+
+            // Remove ownerReferences for remote clusters
+            Secret remoteSecret = new SecretBuilder(secret)
+                .editMetadata()
+                    .withOwnerReferences(Collections.emptyList())
+                .endMetadata()
+                .build();
+
+            // Apply the Secret to the remote cluster
+            remoteClient.resource(remoteSecret).create();
+            LOGGER.infoOp("Successfully created Secret {} in remote cluster {}", secretName, targetCluster);
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to create Secret {} in remote cluster {}", secretName, targetCluster, e);
+            return Future.failedFuture(e);
+        }
     }
 
     /**
