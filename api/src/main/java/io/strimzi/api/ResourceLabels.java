@@ -45,4 +45,9 @@ public class ResourceLabels {
      * Name of the component to which given resource belongs. This typically consists of the cluster name and component.
      */
     public static final String STRIMZI_NAME_LABEL = STRIMZI_DOMAIN + "name";
+
+    /**
+     * The Submariner cluster ID associated with the resource. This identifies the remote cluster for cross-cluster communication.
+     */
+    public static final String STRIMZI_SUBMARINER_CLUSTER_ID_LABEL = STRIMZI_DOMAIN + "submariner-cluster-id";
 }

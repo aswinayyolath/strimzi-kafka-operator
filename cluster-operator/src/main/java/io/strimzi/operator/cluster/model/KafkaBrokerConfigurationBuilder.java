@@ -206,10 +206,11 @@ public class KafkaBrokerConfigurationBuilder {
      * @param clusterName   Name of the cluster (important for the advertised hostnames)
      * @param namespace     Namespace (important for generating the advertised hostname)
      * @param nodes         Set of node references for configuring the KRaft quorum
+     * @param submarinerClusterId Submariner cluster ID for cross-cluster communication
      *
      * @return Returns the builder instance
      */
-    public KafkaBrokerConfigurationBuilder withKRaft(String clusterName, String namespace, Set<NodeRef> nodes)   {
+    public KafkaBrokerConfigurationBuilder withKRaft(String clusterName, String namespace, Set<NodeRef> nodes, String submarinerClusterId)   {
         printSectionHeader("KRaft configuration");
         if (node.controller() || (node.broker() && kafkaMetadataConfigState.isPostMigrationToKRaft())) {
             String roles = "broker,controller";
@@ -222,13 +223,32 @@ public class KafkaBrokerConfigurationBuilder {
         }
         writer.println("controller.listener.names=" + CONTROL_PLANE_LISTENER_NAME);
 
+        // Determine if Stretch mode is enabled
+        boolean stretchModeEnabled = submarinerClusterId != null;
+
         // Generates the controllers quorum list
         // The list should be sorted to avoid random changes to the generated configuration file
         List<String> quorum = nodes.stream()
-                .filter(NodeRef::controller)
-                .sorted(Comparator.comparingInt(NodeRef::nodeId))
-                .map(node -> String.format("%s@%s:9090", node.nodeId(), DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())))
-                .toList();
+            .filter(NodeRef::controller)
+            .sorted(Comparator.comparingInt(NodeRef::nodeId))
+            .map(node -> {
+                if (stretchModeEnabled) {
+                    return String.format(
+                        "%s@%s.%s.%s.%s.svc.clusterset.local:9090",
+                        node.nodeId(),
+                        node.podName(),
+                        node.submarinerClusterId(),
+                        KafkaResources.brokersServiceName(clusterName),
+                        namespace
+                    );
+                } else {
+                    return String.format(
+                        "%s@%s:9090",
+                        node.nodeId(),
+                        DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
+                    );
+                }
+            }).toList();
 
         writer.println("controller.quorum.voters=" + String.join(",", quorum));
 
@@ -240,6 +260,7 @@ public class KafkaBrokerConfigurationBuilder {
     /**
      * Configures the listeners based on the listeners enabled by the users in the Kafka CR. This method is used to
      * generate the per-broker configuration which uses actual broker IDs and addresses instead of just placeholders.
+     * Modifies the advertised.listeners to include the submariner-cluster-id for cross-cluster support.
      *
      * @param clusterName                Name of the cluster (important for the advertised hostnames)
      * @param kafkaVersion               Kafka version of the cluster
@@ -249,22 +270,25 @@ public class KafkaBrokerConfigurationBuilder {
      *                                   broker. This is used to configure the user-configurable listeners.
      * @param advertisedPortProvider     Lambda method which provides the advertised port for given listener and broker.
      *                                   This is used to configure the user-configurable listeners.
+     * @param submarinerClusterId        Submariner cluster ID for cross-cluster communication
      * @return Returns the builder instance
      */
-    @SuppressWarnings({"checkstyle:CyclomaticComplexity"})
+    @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"})
     public KafkaBrokerConfigurationBuilder withListeners(
             String clusterName,
             KafkaVersion kafkaVersion,
             String namespace,
             List<GenericKafkaListener> kafkaListeners,
             Function<String, String> advertisedHostnameProvider,
-            Function<String, String> advertisedPortProvider
+            Function<String, String> advertisedPortProvider,
+            String submarinerClusterId
     )  {
         List<String> listeners = new ArrayList<>();
         List<String> advertisedListeners = new ArrayList<>();
         List<String> securityProtocol = new ArrayList<>();
 
         boolean isKraftControllerOnly = node.controller() && !node.broker();
+        boolean stretchModeEnabled = submarinerClusterId != null;
 
         // Control Plane listener is set for pure KRaft controller or combined node, and broker in ZooKeeper mode or in migration state but not when full KRaft.
         if (node.controller() || (node.broker() && kafkaMetadataConfigState.isZooKeeperToMigration())) {
@@ -272,12 +296,23 @@ public class KafkaBrokerConfigurationBuilder {
 
             // Control Plane listener to be advertised with broker in ZooKeeper-based or migration
             // Kafka version 3.9.0 requires advertised.listeners configuration for controllers, however the previous versions forbids the configuration for controllers.
-            if ((node.broker() && kafkaMetadataConfigState.isZooKeeperToMigration()) || (KafkaVersion.compareDottedVersions(kafkaVersion.version(), "3.9.0") >= 0)) {
-                advertisedListeners.add(String.format("%s://%s:9090",
-                        CONTROL_PLANE_LISTENER_NAME,
-                        // Pod name constructed to be templatable for each individual ordinal
-                        DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
-                ));
+            if (!isKraftControllerOnly && (kafkaMetadataConfigState.isZooKeeperToMigration() || KafkaVersion.compareDottedVersions(kafkaVersion.version(), "3.9.0") >= 0)) {
+                if (stretchModeEnabled) {
+                    advertisedListeners.add(String.format(
+                            "%s://%s.%s.%s.%s.svc.clusterset.local:9090",
+                            CONTROL_PLANE_LISTENER_NAME,
+                            node.podName(),
+                            submarinerClusterId,
+                            KafkaResources.brokersServiceName(clusterName),
+                            namespace
+                    ));
+                } else {
+                    advertisedListeners.add(String.format(
+                            "%s://%s:9090",
+                            CONTROL_PLANE_LISTENER_NAME,
+                            DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
+                    ));
+                }
             }
         }
 
@@ -302,21 +337,49 @@ public class KafkaBrokerConfigurationBuilder {
         if (!isKraftControllerOnly) {
             // Replication listener
             listeners.add(REPLICATION_LISTENER_NAME + "://0.0.0.0:9091");
-            advertisedListeners.add(String.format("%s://%s:9091",
+            if (stretchModeEnabled) {
+                advertisedListeners.add(String.format(
+                    "%s://%s.%s.%s.%s.svc.clusterset.local:9091",
                     REPLICATION_LISTENER_NAME,
-                    // Pod name constructed to be templatable for each individual ordinal
+                    node.podName(),
+                    submarinerClusterId,
+                    KafkaResources.brokersServiceName(clusterName),
+                    namespace
+                ));
+            } else {
+                advertisedListeners.add(String.format(
+                    "%s://%s:9091",
+                    REPLICATION_LISTENER_NAME,
                     DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
-            ));
+                ));
+            }
 
             for (GenericKafkaListener listener : kafkaListeners) {
                 int port = listener.getPort();
                 String listenerName = ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH);
-                String envVarListenerName = ListenersUtils.envVarIdentifier(listener);
+                // String envVarListenerName = ListenersUtils.envVarIdentifier(listener);
 
                 printSectionHeader("Listener configuration: " + listenerName);
 
                 listeners.add(listenerName + "://0.0.0.0:" + port);
-                advertisedListeners.add(String.format("%s://%s:%s", listenerName, advertisedHostnameProvider.apply(envVarListenerName), advertisedPortProvider.apply(envVarListenerName)));
+                if (stretchModeEnabled) {
+                    advertisedListeners.add(String.format(
+                        "%s://%s.%s.%s.%s.svc.clusterset.local:%s",
+                        listenerName,
+                        node.podName(),
+                        submarinerClusterId,
+                        KafkaResources.brokersServiceName(clusterName),
+                        namespace,
+                        port
+                    ));
+                } else {
+                    advertisedListeners.add(String.format(
+                        "%s://%s:%s",
+                        listenerName,
+                        advertisedHostnameProvider.apply(ListenersUtils.envVarIdentifier(listener)),
+                        advertisedPortProvider.apply(ListenersUtils.envVarIdentifier(listener))
+                    ));
+                }
                 configureAuthentication(listenerName, securityProtocol, listener.isTls(), listener.getAuth());
                 configureListener(listenerName, listener.getConfiguration());
 

@@ -1832,11 +1832,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     public String generatePerBrokerConfiguration(int nodeId, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
         KafkaPool pool = nodePoolForNodeId(nodeId);
 
+        String submarinerClusterId = pool.labels.getStrimziSubmarinerClusterId();
+
         return generatePerBrokerConfiguration(
                 pool.nodeRef(nodeId),
                 pool,
                 advertisedHostnames,
-                advertisedPorts
+                advertisedPorts,
+                submarinerClusterId
         );
     }
 
@@ -1847,10 +1850,11 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @param pool                  Pool to which this node belongs - this is used to get pool-specific settings such as storage
      * @param advertisedHostnames   Map with advertised hostnames
      * @param advertisedPorts       Map with advertised ports
+     * @param submarinerClusterId   Submariner Cluster ID to indicate the target clusster(can be null)
      *
      * @return  String with the Kafka broker configuration
      */
-    private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
+    private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts, String submarinerClusterId)   {
         KafkaBrokerConfigurationBuilder builder =
                 new KafkaBrokerConfigurationBuilder(reconciliation, node, this.kafkaMetadataConfigState)
                         .withRackId(rack)
@@ -1860,7 +1864,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                 namespace,
                                 listeners,
                                 listenerId -> advertisedHostnames.get(node.nodeId()).get(listenerId),
-                                listenerId -> advertisedPorts.get(node.nodeId()).get(listenerId)
+                                listenerId -> advertisedPorts.get(node.nodeId()).get(listenerId),
+                                submarinerClusterId
                         )
                         .withAuthorization(cluster, authorization)
                         .withCruiseControl(cluster, ccMetricsReporter, node.broker())
@@ -1901,6 +1906,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @param builder   KafkaBrokerConfigurationBuilder instance to use to build the node configuration
      */
     private void withZooKeeperOrKRaftConfiguration(KafkaPool pool, NodeRef node, KafkaBrokerConfigurationBuilder builder) {
+        String submarinerClusterId = pool.labels.getStrimziSubmarinerClusterId();
+
         if ((node.broker() && this.kafkaMetadataConfigState.isZooKeeperToMigration()) ||
                 (node.controller() && this.kafkaMetadataConfigState.isPreMigrationToKRaft() && this.kafkaMetadataConfigState.isZooKeeperToPostMigration())) {
             builder.withZookeeper(cluster);
@@ -1915,7 +1922,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
         if ((node.broker() && this.kafkaMetadataConfigState.isMigrationToKRaft()) ||
                 (node.controller() && this.kafkaMetadataConfigState.isPreMigrationToKRaft())) {
-            builder.withKRaft(cluster, namespace, nodes());
+            builder.withKRaft(cluster, namespace, nodes(), submarinerClusterId);
             builder.withKRaftMetadataLogDir(VolumeUtils.kraftMetadataPath(pool.storage));
             LOGGER.debugCr(reconciliation, "Adding KRaft configuration on node [{}]", node.podName());
         }
@@ -1937,15 +1944,22 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         List<ConfigMap> configMaps = new ArrayList<>();
 
         for (KafkaPool pool : nodePools)    {
-            for (NodeRef node : pool.nodes())   {
-                Map<String, String> data = new HashMap<>(4);
+            // Retrieve Submariner cluster ID for the pool (If any)
+            String submarinerClusterId = pool.labels.getStrimziSubmarinerClusterId();
+
+            if (submarinerClusterId == null) {
+                LOGGER.warnCr(reconciliation, "No Submariner Cluster ID found in KafkaNodePool {}", pool.poolName);
+            }
+
+            for (NodeRef node : pool.nodes()) {
+                Map<String, String> data =  new HashMap<>(4);
 
                 if (parsedMetrics != null) {
                     data.put(MetricsModel.CONFIG_MAP_KEY, parsedMetrics);
                 }
 
                 data.put(logging.configMapKey(), parsedLogging);
-                data.put(BROKER_CONFIGURATION_FILENAME, generatePerBrokerConfiguration(node, pool, advertisedHostnames, advertisedPorts));
+                data.put(BROKER_CONFIGURATION_FILENAME, generatePerBrokerConfiguration(node, pool, advertisedHostnames, advertisedPorts, submarinerClusterId));
 
                 // List of configured listeners => StrimziPodSets still need this because of OAUTH and how the OAUTH secret
                 // environment variables are parsed in the container bash scripts.

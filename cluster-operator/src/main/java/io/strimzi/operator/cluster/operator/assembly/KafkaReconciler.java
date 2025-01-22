@@ -39,6 +39,7 @@ import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.model.CertUtils;
 import io.strimzi.operator.cluster.model.ClusterCa;
+import io.strimzi.operator.cluster.model.ConfigMapUtils;
 import io.strimzi.operator.cluster.model.ImagePullPolicy;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaConfiguration;
@@ -123,6 +124,7 @@ public class KafkaReconciler {
     private final boolean isNetworkPolicyGeneration;
     private final boolean isPodDisruptionBudgetGeneration;
     private final boolean isKafkaNodePoolsEnabled;
+    private final String crossClusterType; // Currently not used but required for future
     private final List<String> maintenanceWindows;
     private final String operatorNamespace;
     private final Labels operatorNamespaceLabels;
@@ -221,6 +223,7 @@ public class KafkaReconciler {
         this.operatorNamespaceLabels = config.getOperatorNamespaceLabels();
         this.isNetworkPolicyGeneration = config.isNetworkPolicyGeneration();
         this.isKafkaNodePoolsEnabled = ReconcilerUtils.nodePoolsEnabled(kafkaCr);
+        this.crossClusterType = ReconcilerUtils.getCrossClusterType(kafkaCr);
         this.pfa = pfa;
         this.imagePullPolicy = config.getImagePullPolicy();
         this.imagePullSecrets = config.getImagePullSecrets();
@@ -563,7 +566,7 @@ public class KafkaReconciler {
     }
 
     /**
-     * Creates the ServiceAccount in a remote cluster.
+     * Creates the ServiceAccount in a remote cluster if it doesn't already exist.
      *
      * @param targetCluster  Name of the target cluster
      * @param serviceAccount ServiceAccount to create
@@ -590,6 +593,18 @@ public class KafkaReconciler {
             // Create a Kubernetes client for the remote cluster
             Config config = Config.fromKubeconfig(kubeconfig);
             KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Check if the ServiceAccount already exists
+            ServiceAccount existingSa = remoteClient.serviceAccounts()
+                .inNamespace(reconciliation.namespace())
+                .withName(serviceAccount.getMetadata().getName())
+                .get();
+
+            if (existingSa != null) {
+                // ServiceAccount Already exists
+                LOGGER.infoOp("ServiceAccount {} already exists in remote cluster {}", serviceAccount.getMetadata().getName());
+                return Future.succeededFuture(); // No need to create again
+            }
 
             // Reconcile the ServiceAccount in the remote cluster
             remoteClient.resource(serviceAccount).create();
@@ -721,7 +736,8 @@ public class KafkaReconciler {
                     this.logging = kafka.logging().loggingConfiguration(reconciliation, metricsAndLogging.loggingCm());
 
                     List<ConfigMap> desiredConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, listenerReconciliationResults.advertisedHostnames, listenerReconciliationResults.advertisedPorts);
-                    List<Future<?>> ops = new ArrayList<>();
+                    List<Future<?>> centralClusterOps = new ArrayList<>();
+                    List<Future<?>> remoteClusterOps = new ArrayList<>();
 
                     // Delete all existing ConfigMaps which are not desired and are not the shared config map
                     List<String> desiredNames = new ArrayList<>(desiredConfigMaps.size() + 1);
@@ -731,7 +747,7 @@ public class KafkaReconciler {
                     for (ConfigMap cm : existingConfigMaps) {
                         // We delete the cms not on the desired names list
                         if (!desiredNames.contains(cm.getMetadata().getName())) {
-                            ops.add(configMapOperator.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
+                            centralClusterOps.add(configMapOperator.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
                         }
                     }
 
@@ -787,13 +803,74 @@ public class KafkaReconciler {
                         // We store hash of the broker configurations for later use in Pod and in rolling updates
                         this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
 
-                        ops.add(configMapOperator.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
+                        // Reconcile ConfigMaps based on STRIMZI_STRETCH_MODE and target cluster
+                        if (Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE"))) {
+                            if (pool.getTargetCluster() != null) {
+                                // If the KafkaNodePool specifies a remote cluster, create the ConfigMap in the remote cluster
+                                ConfigMap cmWithoutOwnerRef = ConfigMapUtils.createConfigMapWithoutOwnerRef(cm);
+                                remoteClusterOps.add(createConfigMapInRemoteCluster(pool.getTargetCluster(), cmWithoutOwnerRef));
+                            } else {
+                                // If no remote cluster is specified, the ConfigMap belongs to the central cluster
+                                centralClusterOps.add(configMapOperator.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
+                            }
+                        } else {
+                            // If STRIMZI_STRETCH_MODE is not enabled, reconcile all ConfigMaps in the central cluster
+                            centralClusterOps.add(configMapOperator.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
+                        }
                     }
 
-                    return Future
-                            .join(ops)
+
+                    // Combine all operations (central and remote clusters)
+                    return Future.join(centralClusterOps)
+                            .compose(ignore -> Future.join(remoteClusterOps))
                             .map((Void) null);
                 });
+    }
+
+    /**
+     * Creates the ConfigMap in a remote cluster if it doesn't already exist.
+     *
+     * @param targetCluster Name of the target cluster
+     * @param configMap     ConfigMap to create
+     * @return A Future which completes when the ConfigMap is successfully created
+     */
+    private Future<Void> createConfigMapInRemoteCluster(String targetCluster, ConfigMap configMap) {
+        ClusterInfo clusterInfo = getK8sClusters.get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return Future.succeededFuture(); // Skip this cluster
+        }
+
+        try {
+            Secret secret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (secret == null) {
+                LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(secret.getData().get("kubeconfig")));
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            ConfigMap existingCm = remoteClient.configMaps()
+                    .inNamespace(reconciliation.namespace())
+                    .withName(configMap.getMetadata().getName())
+                    .get();
+
+            if (existingCm != null) {
+                LOGGER.infoOp("ConfigMap {} already exists in remote cluster {}", configMap.getMetadata().getName(), targetCluster);
+                return Future.succeededFuture(); // Skip creation
+            }
+
+            remoteClient.resource(configMap).create();
+            LOGGER.infoOp("Successfully created ConfigMap {} in remote cluster {}", configMap.getMetadata().getName(), targetCluster);
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to create ConfigMap {} in remote cluster {}", configMap.getMetadata().getName(), targetCluster, e);
+            return Future.failedFuture(e);
+        }
     }
 
     /**

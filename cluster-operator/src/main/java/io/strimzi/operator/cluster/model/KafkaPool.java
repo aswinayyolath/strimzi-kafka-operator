@@ -273,7 +273,8 @@ public class KafkaPool extends AbstractModel {
      * @return  Node reference created based on the node ID
      */
     public NodeRef nodeRef(int nodeId)  {
-        return new NodeRef(componentName + "-" + nodeId, nodeId, poolName, isController(), isBroker());
+        String submarinerClusterId = labels.getStrimziSubmarinerClusterId();
+        return new NodeRef(componentName + "-" + nodeId, nodeId, poolName, isController(), isBroker(), submarinerClusterId);
     }
 
     /**

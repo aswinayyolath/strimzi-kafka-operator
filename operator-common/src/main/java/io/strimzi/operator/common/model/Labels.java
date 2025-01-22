@@ -125,13 +125,19 @@ public class Labels extends ResourceLabels {
         if (additionalLabels == null || additionalLabels.isEmpty()) {
             return EMPTY;
         } else {
+            // Check for invalid labels, but allow `strimzi.io/cluster` and `strimzi.io/submariner-cluster-id`
             List<String> invalidLabels = additionalLabels
                     .keySet()
                     .stream()
-                    .filter(key -> key.startsWith(Labels.STRIMZI_DOMAIN) && !key.startsWith(Labels.STRIMZI_CLUSTER_LABEL))
+                    .filter(key -> key.startsWith(Labels.STRIMZI_DOMAIN)
+                            && !key.startsWith(Labels.STRIMZI_CLUSTER_LABEL)
+                            && !key.equals("strimzi.io/submariner-cluster-id")) // Allow submariner-cluster-id
                     .toList();
-            if (invalidLabels.size() > 0) {
-                throw new IllegalArgumentException("Labels starting with " + STRIMZI_DOMAIN + " are not allowed in Custom Resources, such labels should be removed.");
+
+            if (!invalidLabels.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "Labels starting with " + STRIMZI_DOMAIN + " are not allowed in Custom Resources, such labels should be removed."
+                );
             }
 
             return new Labels(additionalLabels);
@@ -524,5 +530,38 @@ public class Labels extends ResourceLabels {
         } else {
             return defaultValue;
         }
+    }
+
+    /**
+     * Sets the Submariner cluster ID label (strimzi.io/submariner-cluster-id).
+     *
+     * @param clusterId The Submariner cluster ID to set.
+     * @return A new instance with the given Submariner cluster ID added.
+     */
+    public Labels withStrimziSubmarinerClusterId(String clusterId) {
+        return with(ResourceLabels.STRIMZI_SUBMARINER_CLUSTER_ID_LABEL, clusterId);
+    }
+
+    /**
+     * Gets the Submariner cluster ID label from the resource.
+     *
+     * @param resource Kubernetes resource to retrieve the label from.
+     * @return The Submariner cluster ID if present, otherwise null.
+     */
+    public static String submarinerClusterIdLabel(HasMetadata resource) {
+        return resource != null
+                && resource.getMetadata() != null
+                && resource.getMetadata().getLabels() != null
+                ? resource.getMetadata().getLabels().get(ResourceLabels.STRIMZI_SUBMARINER_CLUSTER_ID_LABEL)
+                : null;
+    }
+
+    /**
+     * Retrieves the value of the `strimzi.io/submariner-cluster-id` label from the KafkaPool labels.
+     *
+     * @return The value of the `strimzi.io/submariner-cluster-id` label, or null if it doesn't exist.
+     */
+    public String getStrimziSubmarinerClusterId() {
+        return this.labels.get(ResourceLabels.STRIMZI_SUBMARINER_CLUSTER_ID_LABEL);
     }
 }

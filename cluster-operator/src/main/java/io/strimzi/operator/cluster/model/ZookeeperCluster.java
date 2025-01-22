@@ -640,7 +640,7 @@ public class ZookeeperCluster extends AbstractModel implements SupportsMetrics, 
         Set<NodeRef> nodes = new LinkedHashSet<>();
 
         for (int i = 0; i < replicas; i++)  {
-            nodes.add(new NodeRef(KafkaResources.zookeeperPodName(cluster, i), i, null, false, false));
+            nodes.add(new NodeRef(KafkaResources.zookeeperPodName(cluster, i), i, null, false, false, null));
         }
 
         return nodes;

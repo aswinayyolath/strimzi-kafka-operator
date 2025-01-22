@@ -13,6 +13,7 @@ import io.strimzi.operator.cluster.model.metrics.SupportsMetrics;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.Labels;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -47,6 +48,20 @@ public class ConfigMapUtils {
                 .endMetadata()
                 .withData(data)
                 .build();
+    }
+
+    /**
+     * Creates a ConfigMap without owner references.
+     *
+     * @param configMap The original ConfigMap.
+     * @return A new ConfigMap with the owner references removed.
+     */
+    public static ConfigMap createConfigMapWithoutOwnerRef(ConfigMap configMap) {
+        ConfigMapBuilder builder = new ConfigMapBuilder(configMap);
+        builder.editMetadata()
+                .withOwnerReferences(new ArrayList<>()) // Explicitly set an empty list
+                .endMetadata();
+        return builder.build();
     }
 
     /**

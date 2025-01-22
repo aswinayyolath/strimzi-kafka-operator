@@ -9,6 +9,7 @@ import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.rbac.ClusterRoleBinding;
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.strimzi.api.ResourceAnnotations;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
@@ -314,7 +315,8 @@ public class ReconcilerUtils {
                 ReconcilerUtils.getPodIndexFromPodName(pod.getMetadata().getName()),
                 ReconcilerUtils.getPoolNameFromPodName(clusterNameFromLabel(pod), pod.getMetadata().getName()),
                 hasRole(pod, Labels.STRIMZI_CONTROLLER_ROLE_LABEL),
-                hasRole(pod, Labels.STRIMZI_BROKER_ROLE_LABEL));
+                hasRole(pod, Labels.STRIMZI_BROKER_ROLE_LABEL),
+                null);
     }
 
     /**
@@ -422,5 +424,15 @@ public class ReconcilerUtils {
             .forEach(entry -> sb.append(entry.getKey()).append(entry.getValue()));
         
         return Util.hashStub(sb.toString());
+    }
+
+    /**
+     * Retrieves the cross-cluster type from the strimzi.io/cross-cluster-type annotation.
+     *
+     * @param kafka The Kafka custom resource which might have the cross-cluster-type annotation
+     * @return The cross-cluster type value (e.g., Submariner, Istio, Cilium) or null if not defined
+     */
+    public static String getCrossClusterType(Kafka kafka) {
+        return Annotations.stringAnnotation(kafka, ResourceAnnotations.ANNO_STRIMZI_IO_CROSS_CLUSTER_TYPE, null);
     }
 }

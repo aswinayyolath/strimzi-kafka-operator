@@ -133,4 +133,10 @@ public class ResourceAnnotations {
      * If missing or with an invalid value, the cluster is assumed to be ZooKeeper-based
      */
     public static final String ANNO_STRIMZI_IO_KRAFT = STRIMZI_DOMAIN + "kraft";
+
+    /**
+     * Annotation for specifying the cross-cluster communication technology (e.g., Submariner, Istio, Cilium).
+     * This annotation is used on the Kafka CR.
+     */
+    public static final String ANNO_STRIMZI_IO_CROSS_CLUSTER_TYPE = STRIMZI_DOMAIN + "cross-cluster-type";
 }
