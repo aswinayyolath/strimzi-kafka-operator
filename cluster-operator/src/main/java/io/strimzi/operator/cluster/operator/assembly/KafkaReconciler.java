@@ -702,7 +702,9 @@ public class KafkaReconciler {
                 secretOperator,
                 serviceOperator,
                 routeOperator,
-                ingressOperator
+                ingressOperator,
+                getK8sClusters,
+                crossClusterType
         );
     }
 

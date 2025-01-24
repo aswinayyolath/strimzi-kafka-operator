@@ -1166,6 +1166,23 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
     /**
+     * Generates a headless Service with optional removal of owner references.
+     *
+     * @param removeOwnerReference If true, removes the owner reference from the Service.
+     * @return The generated Service.
+     */
+    public Service generateHeadlessService(boolean removeOwnerReference) {
+        Service service = generateHeadlessService(); // Call the existing method to generate the Service
+
+        if (removeOwnerReference) {
+            // Remove owner references if the flag is set
+            service.getMetadata().setOwnerReferences(null);
+        }
+
+        return service;
+    }
+
+    /**
      * Prepares annotations for the controller resource such as StrimziPodSet.
      *
      * @param storage   Storage configuration which should be stored in the annotation
@@ -1200,6 +1217,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         List<StrimziPodSet> podSets = new ArrayList<>();
 
         for (KafkaPool pool : nodePools) {
+
             StrimziPodSet podSet = WorkloadUtils.createPodSet(
                     pool.componentName,
                     namespace,
@@ -1266,6 +1284,18 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                                         .withOwnerReferences(Collections.emptyList())
                                                         .endMetadata()
                                                         .build();
+
+                // Check if the StrimziPodSet already exists in the remote cluster
+                StrimziPodSet existingPodSet = remoteClient.resources(StrimziPodSet.class)
+                        .inNamespace(namespace)
+                        .withName(podSet.getMetadata().getName())
+                        .get();
+
+                if (existingPodSet != null) {
+                    // StrimziPodSet already exists, skip creation
+                    LOGGER.infoOp("StrimziPodSet {} already exists in remote cluster {}", podSet.getMetadata().getName(), targetCluster);
+                    return;
+                }
                 // Apply the StrimziPodSet to the remote cluster
                 remoteClient.resource(podSetWithoutOwnerRef).create();
                 LOGGER.infoOp("Successfully created StrimziPodSet {} in remote cluster {}", podSet.getMetadata().getName(), targetCluster);
@@ -1982,7 +2012,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
             }
         }
-
         return configMaps;
     }
 

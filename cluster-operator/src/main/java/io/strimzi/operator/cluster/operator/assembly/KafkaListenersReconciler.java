@@ -4,9 +4,14 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
+import io.fabric8.kubernetes.client.Config;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientBuilder;
+import io.fabric8.kubernetes.client.dsl.NonDeletingOperation;
 import io.fabric8.openshift.api.model.Route;
 import io.strimzi.api.kafka.model.common.CertAndKeySecretSource;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
@@ -15,11 +20,13 @@ import io.strimzi.api.kafka.model.kafka.listener.ListenerAddressBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatus;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.NodeAddressType;
+import io.strimzi.operator.cluster.ClusterInfo;
 import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.model.CertUtils;
 import io.strimzi.operator.cluster.model.ClusterCa;
 import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.model.KafkaCluster;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
@@ -33,8 +40,10 @@ import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.InvalidResourceException;
 import io.vertx.core.Future;
 
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -63,6 +72,9 @@ public class KafkaListenersReconciler {
     private final RouteOperator routeOperator;
     private final IngressOperator ingressOperator;
 
+    private final Map<String, ClusterInfo> getK8sClusters;
+    private final String crossClusterType;
+
     /* test */ final ReconciliationResult result;
 
     /**
@@ -77,6 +89,8 @@ public class KafkaListenersReconciler {
      * @param serviceOperator           The Service operator for working with Kubernetes Services
      * @param routeOperator             The Route operator for working with Kubernetes Route
      * @param ingressOperator           The Ingress operator for working with Kubernetes Ingress
+     * @param getK8sClusters            Map with clusters
+     * @param crossClusterType          Type of the cross-cluster communication used for stretch
      */
     public KafkaListenersReconciler(
             Reconciliation reconciliation,
@@ -89,7 +103,9 @@ public class KafkaListenersReconciler {
             SecretOperator secretOperator,
             ServiceOperator serviceOperator,
             RouteOperator routeOperator,
-            IngressOperator ingressOperator
+            IngressOperator ingressOperator,
+            Map<String, ClusterInfo> getK8sClusters,
+            String crossClusterType
     ) {
         this.reconciliation = reconciliation;
         this.kafka = kafka;
@@ -107,6 +123,8 @@ public class KafkaListenersReconciler {
         this.result = new ReconciliationResult();
         // Fill in the alternative names from the listener configuration
         this.result.bootstrapDnsNames.addAll(ListenersUtils.alternativeNames(kafka.getListeners()));
+        this.getK8sClusters = getK8sClusters;
+        this.crossClusterType = crossClusterType;
     }
 
     /**
@@ -133,19 +151,193 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Makes sure all desired services are updated and the rest is deleted. This method updates all services in one go
+     * Makes sure all desired services and ServiceExports are created in central and remote clusters.
      *           => the regular headless, node-port or load balancer ones.
      *
-     * @return  Future which completes when all services are created or deleted.
+     * @return Future which completes when all services and ServiceExports are created.
      */
     protected Future<Void> services() {
-        List<Service> services = new ArrayList<>();
-        services.add(kafka.generateService());
-        services.add(kafka.generateHeadlessService());
-        services.addAll(kafka.generateExternalBootstrapServices());
-        services.addAll(kafka.generatePerPodServices());
+        List<Service> centralClusterServices = new ArrayList<>();
+        List<Future<Void>> remoteClusterServiceOps = new ArrayList<>();
+        List<Future<Void>> serviceExportOps = new ArrayList<>();
 
-        return serviceOperator.batchReconcile(reconciliation, reconciliation.namespace(), services, kafka.getSelectorLabels()).map((Void) null);
+        // Add services to the central cluster
+        centralClusterServices.add(kafka.generateService());
+        centralClusterServices.add(kafka.generateHeadlessService());
+        centralClusterServices.addAll(kafka.generateExternalBootstrapServices());
+        centralClusterServices.addAll(kafka.generatePerPodServices());
+
+        // Reconcile services for the central cluster
+        Future<Void> centralClusterReconcile = serviceOperator
+                .batchReconcile(reconciliation, reconciliation.namespace(), centralClusterServices, kafka.getSelectorLabels())
+                .map((Void) null);
+
+        // Add ServiceExport for central cluster if stretch mode and cross-cluster type are enabled
+        if (Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE")) && "submariner".equalsIgnoreCase(this.crossClusterType)) {
+            // Generate ServiceExport YAML for central cluster
+            String centralServiceExportYaml = generateServiceExportYaml(
+                    KafkaResources.brokersServiceName(kafka.getCluster()),
+                    reconciliation.namespace()
+            );
+
+            // Apply ServiceExport in the central cluster
+            serviceExportOps.add(applyYamlInCluster(centralServiceExportYaml, reconciliation.namespace(), null));
+
+            // Handle remote clusters
+            List<KafkaPool> kafkaNodePools = kafka.getNodePools();
+            for (KafkaPool pool : kafkaNodePools) {
+                String targetCluster = pool.getTargetCluster();
+
+                if (targetCluster != null) {
+                    // Generate the headless service without owner references
+                    Service remoteHeadlessService = kafka.generateHeadlessService(true);
+                    remoteClusterServiceOps.add(createServiceInRemoteCluster(targetCluster, remoteHeadlessService));
+
+                    // Generate ServiceExport YAML for remote cluster
+                    String remoteServiceExportYaml = generateServiceExportYaml(
+                            KafkaResources.brokersServiceName(kafka.getCluster()),
+                            reconciliation.namespace()
+                    );
+
+                    // Apply ServiceExport in the remote cluster
+                    serviceExportOps.add(applyYamlInCluster(remoteServiceExportYaml, reconciliation.namespace(), targetCluster));
+                }
+            }
+        }
+
+        // Combine all reconciliation tasks
+        return Future.join(centralClusterReconcile, Future.join(remoteClusterServiceOps), Future.join(serviceExportOps))
+                .compose(ignore -> Future.succeededFuture());
+    }
+
+    /**
+     * Generates a ServiceExport resource.
+     *
+     * @param serviceName The name of the Service to export.
+     * @param namespace   The namespace of the Service.
+     * @return The generated ServiceExport YAML as a String.
+     */
+    public static String generateServiceExportYaml(String serviceName, String namespace) {
+        return String.format(
+            "apiVersion: multicluster.x-k8s.io/v1alpha1\n" +
+            "kind: ServiceExport\n" +
+            "metadata:\n" +
+            "  name: %s\n" +
+            "  namespace: %s\n",
+            serviceName,
+            namespace
+        );
+    }
+
+    /**
+     * Creates the Service in a remote cluster.
+     *
+     * @param targetCluster Target cluster ID
+     * @param service       Service to create
+     * @return Future which completes when the Service is successfully created
+     */
+    private Future<Void> createServiceInRemoteCluster(String targetCluster, Service service) {
+        ClusterInfo clusterInfo = getK8sClusters.get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return Future.succeededFuture(); // Skip this cluster
+        }
+
+        try {
+            // Fetch the kubeconfig from the Kubernetes Secret
+            Secret secret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (secret == null) {
+                LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(secret.getData().get("kubeconfig")));
+
+            // Create a Kubernetes client for the remote cluster
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Check if the Service already exists
+            Service existingService = remoteClient.services()
+                    .inNamespace(reconciliation.namespace())
+                    .withName(service.getMetadata().getName())
+                    .get();
+
+            if (existingService != null) {
+                LOGGER.infoOp("Service {} already exists in remote cluster {}", service.getMetadata().getName(), targetCluster);
+                return Future.succeededFuture();
+            }
+
+            // Reconcile the Service in the remote cluster
+            remoteClient.resource(service).create();
+            LOGGER.infoOp("Successfully created Service {} in remote cluster {}", service.getMetadata().getName(), targetCluster);
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to create Service {} in remote cluster {}", service.getMetadata().getName(), targetCluster, e);
+            return Future.failedFuture(e);
+        }
+    }
+
+    /**
+     * Applies a YAML string as a resource in the specified cluster.
+     *
+     * @param yaml          The YAML content to apply.
+     * @param namespace     The namespace in which to apply the resource.
+     * @param targetCluster The target cluster ID. If null, applies to the central cluster.
+     * @return Future which completes when the YAML is successfully applied.
+     */
+    private Future<Void> applyYamlInCluster(String yaml, String namespace, String targetCluster) {
+        ClusterInfo clusterInfo = targetCluster != null ? getK8sClusters.get(targetCluster) : null;
+
+        try {
+            KubernetesClient client;
+
+            if (clusterInfo == null) {
+                // Central cluster
+                LOGGER.infoOp("Applying resource to the central cluster.");
+                client = new KubernetesClientBuilder().build();
+            } else {
+                // Remote cluster
+                Secret secret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+                if (secret == null) {
+                    LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                    return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+                }
+
+                String kubeconfig = new String(Base64.getDecoder().decode(secret.getData().get("kubeconfig")));
+                Config config = Config.fromKubeconfig(kubeconfig);
+                client = new KubernetesClientBuilder().withConfig(config).build();
+            }
+
+            // Parse the YAML into resources
+            List<HasMetadata> resources = client.load(new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8))).items();
+
+            for (HasMetadata resource : resources) {
+                if (resource == null) {
+                    LOGGER.warnOp("Encountered a null resource while processing YAML. Skipping.");
+                    continue;
+                }
+
+                // Use createOr for idempotent application of resources
+                // Ideally we should use this everywhere (not just for ServiceExport)
+                // Also we should try to refactor code that creates remote resources
+                // The best thing to do is to try to create a Common Function for remote Resource creation
+                client.resource(resource)
+                        .inNamespace(namespace)
+                        .createOr(NonDeletingOperation::update);
+
+                LOGGER.infoOp("Successfully applied {} {} in {} cluster",
+                        resource.getKind(), resource.getMetadata().getName(),
+                        targetCluster != null ? targetCluster : "central");
+            }
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to apply YAML in {} cluster", targetCluster != null ? targetCluster : "central", e);
+            return Future.failedFuture(e);
+        }
     }
 
     /**
