@@ -95,6 +95,7 @@ import org.apache.kafka.common.KafkaException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -896,11 +897,22 @@ public class KafkaReconciler {
      * @return      Completes when the Secret was successfully created or updated
      */
     protected Future<Void> certificateSecret(Clock clock) {
-        return secretOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()))
+        // Reconcile the secret in the central cluster
+        Future<Void> centralSecretReconciliation = secretOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()))
                 .compose(oldSecret -> {
-                    return secretOperator
-                            .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()),
-                                    kafka.generateCertificatesSecret(clusterCa, clientsCa, oldSecret, listenerReconciliationResults.bootstrapDnsNames, listenerReconciliationResults.brokerDnsNames, Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())))
+                    Secret centralSecret = kafka.generateCertificatesSecret(
+                            clusterCa,
+                            clientsCa,
+                            oldSecret,
+                            listenerReconciliationResults.bootstrapDnsNames,
+                            listenerReconciliationResults.brokerDnsNames,
+                            Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())
+                    );
+
+                    // Filter certificates for central cluster only
+                    centralSecret = filterCertificatesForCluster(centralSecret, null);
+
+                    return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()), centralSecret)
                             .compose(patchResult -> {
                                 if (patchResult != null) {
                                     for (NodeRef node : kafka.nodes()) {
@@ -911,11 +923,137 @@ public class KafkaReconciler {
                                                 ));
                                     }
                                 }
-
                                 return Future.succeededFuture();
                             });
                 });
+
+        // Reconcile secrets in remote clusters
+        List<Future<Void>> remoteSecretReconciliations = new ArrayList<>();
+        List<KafkaPool> kafkaPools = kafka.getNodePools();
+
+        for (KafkaPool pool : kafkaPools) {
+            String targetCluster = pool.getTargetCluster();
+
+            if (targetCluster != null) {
+                remoteSecretReconciliations.add(secretOperator.getAsync(reconciliation.namespace(), KafkaResources.kafkaSecretName(reconciliation.name()))
+                        .compose(oldSecret -> {
+                            Secret remoteSecret = kafka.generateCertificatesSecret(
+                                    clusterCa,
+                                    clientsCa,
+                                    oldSecret,
+                                    listenerReconciliationResults.bootstrapDnsNames,
+                                    listenerReconciliationResults.brokerDnsNames,
+                                    Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())
+                            );
+
+                            // Filter certificates for the remote cluster
+                            remoteSecret = filterCertificatesForCluster(remoteSecret, targetCluster);
+
+                            // Remove OwnerReferences for the remote secret
+                            remoteSecret.getMetadata().setOwnerReferences(Collections.emptyList());
+
+                            return applySecretToRemoteCluster(targetCluster, remoteSecret);
+                        }));
+            }
+        }
+
+        // Combine central and remote reconciliations
+        return Future.join(centralSecretReconciliation, Future.join(remoteSecretReconciliations))
+                .map((Void) null);
     }
+
+
+    /**
+     * Filters certificates in the secret to include only those relevant to the specified target cluster.
+     *
+     * @param secret        The secret containing all certificates and keys.
+     * @param targetCluster The target cluster. If null, filters for the central cluster.
+     * @return              The filtered secret containing only the certificates and keys for the specified cluster.
+     */
+    private Secret filterCertificatesForCluster(Secret secret, String targetCluster) {
+
+        Map<String, String> filteredData = new HashMap<>();
+        List<KafkaPool> kafkaPools = kafka.getNodePools(); // Get all KafkaNodePools
+        String kafkaClusterName = kafka.getCluster();
+
+        // Iterate through all KafkaPools
+        for (KafkaPool pool : kafkaPools) {
+            String poolTargetCluster = pool.getTargetCluster(); // Target cluster for this pool
+            String nodePoolName = pool.getPoolName(); // KafkaNodePool name
+
+            // Determine if this pool belongs to the target cluster
+            boolean isCentralCluster = targetCluster == null && poolTargetCluster == null; // Central cluster
+            boolean isTargetRemoteCluster = targetCluster != null && targetCluster.equals(poolTargetCluster); // Remote cluster
+
+            if (isCentralCluster || isTargetRemoteCluster) {
+                // Match certificates based on KafkaNodePool name
+                for (Map.Entry<String, String> entry : secret.getData().entrySet()) {
+                    String key = entry.getKey();
+
+
+                    // Include keys that start with the KafkaNodePool name
+                    if (key.startsWith(kafkaClusterName + '-' + nodePoolName)) {
+                        filteredData.put(key, entry.getValue());
+                    }
+                }
+            }
+        }
+
+        // Update the Secret with the filtered data
+        secret.setData(filteredData);
+        return secret;
+    }
+
+
+    /**
+     * Applies the secret to the specified remote cluster.
+     *
+     * @param targetCluster The target cluster ID
+     * @param secret        The secret to apply
+     * @return              A Future that completes when the secret is successfully applied
+     */
+    private Future<Void> applySecretToRemoteCluster(String targetCluster, Secret secret) {
+        ClusterInfo clusterInfo = getK8sClusters.get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return Future.succeededFuture(); // Skip this cluster
+        }
+
+        try {
+            // Fetch the kubeconfig for the remote cluster
+            Secret kubeconfigSecret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (kubeconfigSecret == null) {
+                LOGGER.errorOp("Kubeconfig Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return Future.failedFuture("Kubeconfig Secret not found for cluster " + targetCluster);
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(kubeconfigSecret.getData().get("kubeconfig")));
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Check if the secret already exists in the remote cluster
+            Secret existingSecret = remoteClient.secrets()
+                    .inNamespace(secret.getMetadata().getNamespace())
+                    .withName(secret.getMetadata().getName())
+                    .get();
+
+            if (existingSecret != null) {
+                LOGGER.infoOp("Secret {} already exists in remote cluster {}. Skipping creation.", secret.getMetadata().getName(), targetCluster);
+                return Future.succeededFuture(); // Skip creation
+            }
+
+            // Apply the secret to the remote cluster
+            remoteClient.resource(secret).inNamespace(secret.getMetadata().getNamespace()).create();
+            LOGGER.infoOp("Successfully applied Secret {} in remote cluster {}", secret.getMetadata().getName(), targetCluster);
+
+            return Future.succeededFuture();
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to apply Secret {} in remote cluster {}", secret.getMetadata().getName(), targetCluster, e);
+            return Future.failedFuture(e);
+        }
+    }
+
 
     /**
      * Manages the secret with JMX credentials when JMX is enabled

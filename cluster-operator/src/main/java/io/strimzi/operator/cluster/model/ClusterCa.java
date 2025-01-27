@@ -199,6 +199,7 @@ public class ClusterCa extends Ca {
      * @param externalBootstrapAddresses            List of external bootstrap addresses (used for certificate SANs)
      * @param externalAddresses                     Map with external listener addresses for the different nodes (used for certificate SANs)
      * @param isMaintenanceTimeWindowsSatisfied     Flag indicating whether we can do maintenance tasks or not
+     * @param submarinerClusterId                   Submariner cluster ID for cross-cluster communication
      *
      * @return  Map with CertAndKey objects containing the public and private keys for the different brokers
      *
@@ -211,7 +212,8 @@ public class ClusterCa extends Ca {
             Set<NodeRef> nodes,
             Set<String> externalBootstrapAddresses,
             Map<Integer, Set<String>> externalAddresses,
-            boolean isMaintenanceTimeWindowsSatisfied
+            boolean isMaintenanceTimeWindowsSatisfied,
+            String submarinerClusterId
     ) throws IOException {
         Function<NodeRef, Subject> subjectFn = node -> {
             Subject.Builder subject = new Subject.Builder()
@@ -224,6 +226,14 @@ public class ClusterCa extends Ca {
             subject.addDnsName(DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
             subject.addDnsName(DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
 
+            if (submarinerClusterId != null) {
+                subject.addDnsName(String.format("%s.%s.%s.%s.svc.clusterset.local",
+                    node.podName(),
+                    submarinerClusterId,
+                    KafkaResources.brokersServiceName(clusterName),
+                    namespace
+                ));
+            }
             // Controller-only nodes do not have the SANs for external listeners.
             // That helps us to avoid unnecessary rolling updates when the SANs change
             if (node.broker())    {

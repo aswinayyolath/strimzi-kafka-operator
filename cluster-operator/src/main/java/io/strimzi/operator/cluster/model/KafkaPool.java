@@ -347,4 +347,13 @@ public class KafkaPool extends AbstractModel {
     public String getTargetCluster() {
         return targetCluster;
     }
+
+    /**
+     * Returns the name of the Kafka node pool.
+     *
+     * @return The name of the Kafka pool.
+     */
+    public String getPoolName() {
+        return poolName; // This method can be removed and we should use Noderef instead.
+    }
 }

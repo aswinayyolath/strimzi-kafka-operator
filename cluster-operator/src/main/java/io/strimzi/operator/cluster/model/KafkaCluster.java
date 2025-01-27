@@ -1319,18 +1319,38 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return  The generated Secret with broker certificates
      */
     public Secret generateCertificatesSecret(ClusterCa clusterCa, ClientsCa clientsCa, Secret existingSecret, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied) {
-        Set<NodeRef> nodes = nodes();
-        Map<String, CertAndKey> brokerCerts;
+        Map<String, CertAndKey> allBrokerCerts = new HashMap<>();
 
-        try {
-            brokerCerts = clusterCa.generateBrokerCerts(namespace, cluster, existingSecret, nodes, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied);
-        } catch (IOException e) {
-            LOGGER.warnCr(reconciliation, "Error while generating certificates", e);
-            throw new RuntimeException("Failed to prepare Kafka certificates", e);
+        for (KafkaPool pool : nodePools) {
+            // Retrieve Submariner cluster ID for the pool (if any)
+            String submarinerClusterId = pool.labels.getStrimziSubmarinerClusterId();
+
+            // Nodes for this specific KafkaPool
+            Set<NodeRef> poolNodes = pool.nodes();
+
+            try {
+                // Generate certificates for the current pool
+                Map<String, CertAndKey> brokerCerts = clusterCa.generateBrokerCerts(
+                        namespace,
+                        cluster,
+                        existingSecret,
+                        poolNodes,
+                        externalBootstrapDnsName,
+                        externalDnsNames,
+                        isMaintenanceTimeWindowsSatisfied,
+                        submarinerClusterId // Passign the Submariner cluster ID for remote clusters
+                );
+
+                // Merge the generated certificates into the overall collection
+                allBrokerCerts.putAll(brokerCerts);
+            } catch (IOException e) {
+                LOGGER.warnCr(reconciliation, "Error while generating certificates for pool {}", pool.componentName, e);
+                throw new RuntimeException("Failed to prepare Kafka certificates for pool: " + pool.componentName, e);
+            }
         }
 
         return ModelUtils.createSecret(KafkaResources.kafkaSecretName(cluster), namespace, labels, ownerReference,
-                CertUtils.buildSecretData(brokerCerts),
+                CertUtils.buildSecretData(allBrokerCerts),
                 Map.ofEntries(
                         clusterCa.caCertGenerationFullAnnotation(),
                         clientsCa.caCertGenerationFullAnnotation()
