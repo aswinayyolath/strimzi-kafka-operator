@@ -692,12 +692,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
     /**
-     * Generates a Service according to configured defaults
+     * Generates a Bootstrap Service according to configured defaults.
+     * 
+     * If STRIMZI_STRETCH_MODE is enabled, it will also create the service in remote clusters.
      *
-     * @return The generated Service
+     * @return The generated Bootstrap Service.
      */
     public Service generateService() {
-        return ServiceUtils.createDiscoverableClusterIpService(
+        Service service = ServiceUtils.createDiscoverableClusterIpService(
                 KafkaResources.bootstrapServiceName(cluster),
                 namespace,
                 labels,
@@ -708,7 +710,72 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 null,
                 getInternalDiscoveryAnnotation()
         );
+
+        // If STRETCH_MODE is disabled, return only the central cluster service
+        if (!Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE"))) {
+            return service;
+        }
+
+        // Process remote clusters
+        List<KafkaPool> kafkaNodePools = getNodePools();
+        kafkaNodePools.stream()
+                .filter(pool -> pool.getTargetCluster() != null) // Filter for remote clusters
+                .forEach(pool -> createBootstrapServiceInRemoteCluster(pool.getTargetCluster(), service));
+
+        return service;
     }
+
+    /**
+     * Creates the Bootstrap Service in a remote cluster if it doesn't already exist.
+     *
+     * @param targetCluster Name of the target cluster.
+     * @param service       Bootstrap Service to create.
+     */
+    private void createBootstrapServiceInRemoteCluster(String targetCluster, Service service) {
+        ClusterInfo clusterInfo = clusterOperatorConfig.getK8sClusters().get(targetCluster);
+
+        if (clusterInfo == null) {
+            LOGGER.warnOp("No cluster information found for target cluster {}", targetCluster);
+            return; // Skip this cluster
+        }
+
+        try {
+            // Fetch the kubeconfig from the Kubernetes Secret
+            Secret secret = secretOperator.get(reconciliation.namespace(), clusterInfo.getSecret());
+            if (secret == null) {
+                LOGGER.errorOp("Secret {} not found for cluster {}", clusterInfo.getSecret(), targetCluster);
+                return;
+            }
+
+            String kubeconfig = new String(Base64.getDecoder().decode(secret.getData().get("kubeconfig")));
+
+            // Create a Kubernetes client for the remote cluster
+            Config config = Config.fromKubeconfig(kubeconfig);
+            KubernetesClient remoteClient = new KubernetesClientBuilder().withConfig(config).build();
+
+            // Check if the Bootstrap Service already exists
+            Service existingService = remoteClient.services()
+                    .inNamespace(reconciliation.namespace())
+                    .withName(service.getMetadata().getName())
+                    .get();
+
+            if (existingService != null) {
+                LOGGER.infoOp("Bootstrap Service {} already exists in remote cluster {}", service.getMetadata().getName(), targetCluster);
+                return; // No need to create again
+            }
+
+            // Remove OwnerReferences for remote clusters
+            service.getMetadata().setOwnerReferences(null);
+
+            // Apply the Bootstrap Service in the remote cluster
+            remoteClient.resource(service).create();
+            LOGGER.infoOp("Successfully created Bootstrap Service {} in remote cluster {}", service.getMetadata().getName(), targetCluster);
+
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to create Bootstrap Service {} in remote cluster {}", service.getMetadata().getName(), targetCluster, e);
+        }
+    }
+
 
     /**
      * Generates a JSON String with the discovery annotation for the internal bootstrap service
