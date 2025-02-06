@@ -163,16 +163,31 @@ public class KafkaListenersReconciler {
 
         // Add services to the central cluster
         centralClusterServices.add(kafka.generateService());
-        centralClusterServices.add(kafka.generateHeadlessService());
         centralClusterServices.addAll(kafka.generateExternalBootstrapServices());
         centralClusterServices.addAll(kafka.generatePerPodServices());
+
+        // Add headless service (this should be created in all cases, whether it's Submariner or Cilium)
+        Service headlessService = kafka.generateHeadlessService();
+        centralClusterServices.add(headlessService);
 
         // Reconcile services for the central cluster
         Future<Void> centralClusterReconcile = serviceOperator
                 .batchReconcile(reconciliation, reconciliation.namespace(), centralClusterServices, kafka.getSelectorLabels())
                 .map((Void) null);
 
-        // Add ServiceExport for central cluster if stretch mode and cross-cluster type are enabled
+        // Handle remote clusters (Create headless service for all cases)
+        List<KafkaPool> kafkaNodePools = kafka.getNodePools();
+        for (KafkaPool pool : kafkaNodePools) {
+            String targetCluster = pool.getTargetCluster();
+
+            if (targetCluster != null) {
+                // Generate the headless service without owner references
+                Service remoteHeadlessService = kafka.generateHeadlessService(true);
+                remoteClusterServiceOps.add(createServiceInRemoteCluster(targetCluster, remoteHeadlessService));
+            }
+        }
+
+        // Add ServiceExport handling (ONLY for Submariner)
         if (Boolean.parseBoolean(System.getenv("STRIMZI_STRETCH_MODE")) && "submariner".equalsIgnoreCase(this.crossClusterType)) {
             // Generate ServiceExport YAML for central cluster
             String centralServiceExportYaml = generateServiceExportYaml(
@@ -183,16 +198,9 @@ public class KafkaListenersReconciler {
             // Apply ServiceExport in the central cluster
             serviceExportOps.add(applyYamlInCluster(centralServiceExportYaml, reconciliation.namespace(), null));
 
-            // Handle remote clusters
-            List<KafkaPool> kafkaNodePools = kafka.getNodePools();
             for (KafkaPool pool : kafkaNodePools) {
                 String targetCluster = pool.getTargetCluster();
-
                 if (targetCluster != null) {
-                    // Generate the headless service without owner references
-                    Service remoteHeadlessService = kafka.generateHeadlessService(true);
-                    remoteClusterServiceOps.add(createServiceInRemoteCluster(targetCluster, remoteHeadlessService));
-
                     // Generate ServiceExport YAML for remote cluster
                     String remoteServiceExportYaml = generateServiceExportYaml(
                             KafkaResources.brokersServiceName(kafka.getCluster()),
