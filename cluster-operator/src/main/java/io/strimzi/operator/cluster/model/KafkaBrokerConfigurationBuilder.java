@@ -30,6 +30,7 @@ import io.strimzi.api.kafka.model.kafka.tieredstorage.TieredStorageCustom;
 import io.strimzi.kafka.oauth.server.ServerConfig;
 import io.strimzi.kafka.oauth.server.plain.ServerPlainConfig;
 import io.strimzi.operator.cluster.model.cruisecontrol.CruiseControlMetricsReporter;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.model.cruisecontrol.CruiseControlConfigurationParameters;
 
@@ -66,6 +67,9 @@ public class KafkaBrokerConfigurationBuilder {
     private final PrintWriter writer = new PrintWriter(stringWriter);
     private final Reconciliation reconciliation;
     private final NodeRef node;
+
+    private boolean isStretchMode;
+    private StretchNetworkingProvider stretchNetworkingProvider;
 
     /**
      * Broker configuration template constructor
@@ -155,6 +159,28 @@ public class KafkaBrokerConfigurationBuilder {
     }
 
     /**
+     * Adds the stretch mode property to the KafkaBrokerConfigurationBuilder object
+     * @param isStretchMode Indicates if stretch mode is enabled
+     *
+     * @return Returns the builder instance
+     */
+    public KafkaBrokerConfigurationBuilder withStretch(boolean isStretchMode)   {
+        this.isStretchMode = isStretchMode;
+        return this;
+    }
+
+    /**
+     * Sets the stretch networking provider to be used for DNS generation
+     *
+     * @param provider The stretch networking provider
+     * @return Returns the builder instance
+     */
+    public KafkaBrokerConfigurationBuilder withStretchNetworkingProvider(StretchNetworkingProvider provider) {
+        this.stretchNetworkingProvider = provider;
+        return this;
+    }
+
+    /**
      * Adds the KRaft configuration. This includes the roles of the broker, the controller listener name and the list
      * of all controllers for quorum voting.
      *
@@ -177,12 +203,47 @@ public class KafkaBrokerConfigurationBuilder {
 
         writer.println("controller.listener.names=" + CONTROL_PLANE_LISTENER_NAME);
 
+
+
         // Generates the controllers quorum list
         // The list should be sorted to avoid random changes to the generated configuration file
         List<String> quorum = nodes.stream()
                 .filter(NodeRef::controller)
                 .sorted(Comparator.comparingInt(NodeRef::nodeId))
-                .map(node -> String.format("%s@%s:9090", node.nodeId(), DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())))
+                .map(node -> {
+                    String podDns;
+
+                    if (isStretchMode && stretchNetworkingProvider != null) {
+                        // Use the stretch networking provider for DNS generation
+                        podDns = stretchNetworkingProvider.generatePodDnsName(
+                            namespace,
+                            KafkaResources.brokersServiceName(clusterName),
+                            node.podName(),
+                            node.clusterId()
+                        );
+                    } else if (isStretchMode) {
+                        // Fallback to the old MCS-based DNS generation
+                        podDns = DnsNameGenerator.podDnsNameWithClusterId(
+                            node.clusterId(),
+                            namespace,
+                            KafkaResources.brokersServiceName(clusterName),
+                            node.podName()
+                        );
+                    } else {
+                        // Standard DNS generation for non-stretch mode
+                        podDns = DnsNameGenerator.podDnsName(
+                            namespace,
+                            KafkaResources.brokersServiceName(clusterName),
+                            node.podName()
+                        );
+                    }
+
+                    return String.format(
+                        "%s@%s:9090",
+                        node.nodeId(),
+                        podDns
+                    );
+                })
                 .toList();
 
         writer.println("controller.quorum.voters=" + String.join(",", quorum));
@@ -231,12 +292,40 @@ public class KafkaBrokerConfigurationBuilder {
         // Listeners for nodes with controller role
         ////////////////////
 
+        String podDNS;
+
+        if (isStretchMode && stretchNetworkingProvider != null) {
+            // Use the stretch networking provider for DNS generation
+            podDNS = stretchNetworkingProvider.generatePodDnsName(
+                namespace,
+                KafkaResources.brokersServiceName(clusterName),
+                node.podName(),
+                node.clusterId()
+            );
+        } else if (isStretchMode) {
+            // Fallback to the old MCS-based DNS generation
+            podDNS = DnsNameGenerator.podDnsNameWithClusterDomainAndClusterId(
+                node.clusterId(),
+                namespace,
+                KafkaResources.brokersServiceName(clusterName),
+                node.podName()
+            );
+        } else {
+            // Standard DNS generation for non-stretch mode
+            podDNS = DnsNameGenerator.podDnsNameWithoutClusterDomain(
+                namespace,
+                KafkaResources.brokersServiceName(clusterName),
+                node.podName()
+            );
+        }
+
+
         if (node.controller()) {
             listeners.add(CONTROL_PLANE_LISTENER_NAME + "://0.0.0.0:9090");
             advertisedListeners.add(String.format("%s://%s:9090",
                     CONTROL_PLANE_LISTENER_NAME,
                     // Pod name constructed to be templatable for each individual ordinal
-                    DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
+                    podDNS
             ));
         }
 
@@ -251,7 +340,7 @@ public class KafkaBrokerConfigurationBuilder {
             advertisedListeners.add(String.format("%s://%s:9091",
                     REPLICATION_LISTENER_NAME,
                     // Pod name constructed to be templatable for each individual ordinal
-                    DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName())
+                    podDNS
             ));
             configureReplicationListener();
 

@@ -282,10 +282,23 @@ public abstract class AbstractOperator<
                 S status = (S) e.getStatus();
                 StatusUtils.addConditionsToStatus(status, unknownAndDeprecatedConditions);
 
-                LOGGER.errorCr(reconciliation, "createOrUpdate failed", e.getCause());
-                updateStatus(reconciliation, status).onComplete(statusResult -> createOrUpdate.fail(e.getCause()));
+                // For user configuration errors, log only the message (no stack trace)
+                Throwable cause = e.getCause();
+                if (cause instanceof io.strimzi.operator.common.model.InvalidResourceException
+                        || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                    LOGGER.errorCr(reconciliation, "createOrUpdate failed: {}", cause.getMessage());
+                } else {
+                    LOGGER.errorCr(reconciliation, "createOrUpdate failed", cause);
+                }
+                updateStatus(reconciliation, status).onComplete(statusResult -> createOrUpdate.fail(cause));
             } else {
-                LOGGER.errorCr(reconciliation, "createOrUpdate failed", res.cause());
+                // For user configuration errors, log only the message (no stack trace)
+                if (res.cause() instanceof io.strimzi.operator.common.model.InvalidResourceException
+                        || res.cause() instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                    LOGGER.errorCr(reconciliation, "createOrUpdate failed: {}", res.cause().getMessage());
+                } else {
+                    LOGGER.errorCr(reconciliation, "createOrUpdate failed", res.cause());
+                }
                 createOrUpdate.fail(res.cause());
             }
         });
@@ -563,7 +576,15 @@ public abstract class AbstractOperator<
                 updateResourceState(reconciliation, false, cause).onComplete(stateUpdateResult -> {
                     metrics().failedReconciliationsCounter(reconciliation.namespace()).increment();
                     reconciliationTimerSample.stop(metrics().reconciliationsTimer(reconciliation.namespace()));
-                    LOGGER.warnCr(reconciliation, "Failed to reconcile", cause);
+
+                    // For user configuration errors, log only the message (no stack trace)
+                    if (cause instanceof io.strimzi.operator.common.model.InvalidResourceException
+                            || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                        LOGGER.warnCr(reconciliation, "Failed to reconcile: {}", cause.getMessage());
+                    } else {
+                        LOGGER.warnCr(reconciliation, "Failed to reconcile", cause);
+                    }
+
                     handlingResult.handle(stateUpdateResult);
                 });
             }

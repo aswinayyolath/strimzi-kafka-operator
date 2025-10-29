@@ -178,4 +178,21 @@ public abstract class AbstractModel {
                 templateServiceAccount
         );
     }
+
+    /**
+     * Generates the Service Account.
+     *
+     * @param removeOwnerReference If true, removes the owner reference from the Service Account.
+     * @return The generated Service Account.
+     */
+    public ServiceAccount generateServiceAccount(boolean removeOwnerReference) {
+        ServiceAccount sa = generateServiceAccount(); // Call the existing method to generate the ServiceAccount
+
+        if (removeOwnerReference) {
+            // Remove owner references if the flag is set
+            sa.getMetadata().setOwnerReferences(null);
+        }
+
+        return sa;
+    }
 }

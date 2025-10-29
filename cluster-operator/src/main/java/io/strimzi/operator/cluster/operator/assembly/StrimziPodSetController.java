@@ -79,6 +79,9 @@ public class StrimziPodSetController implements Runnable {
     private final Informer<KafkaConnect> kafkaConnectInformer;
     private final Informer<KafkaMirrorMaker2> kafkaMirrorMaker2Informer;
 
+    private final boolean isStretchConfigured;
+    private final String centralClusterId;
+
     /**
      * Creates the StrimziPodSet controller. The controller should normally exist once per operator for cluster-wide mode
      * or once per namespace for namespaced mode.
@@ -94,6 +97,8 @@ public class StrimziPodSetController implements Runnable {
      * @param podOperator                   Pod operator for managing pods
      * @param metricsProvider               Metrics provider
      * @param podSetControllerWorkQueueSize Indicates the size of the StrimziPodSetController work queue
+     * @param isStretchConfigured           Indicates weather the stretch cluster config is set properly at env
+     * @param centralClusterId              Indicates the central cluster id for a stretched kafka configuration
      */
     public StrimziPodSetController(
             String watchedNamespace,
@@ -104,7 +109,9 @@ public class StrimziPodSetController implements Runnable {
             StrimziPodSetOperator strimziPodSetOperator,
             PodOperator podOperator,
             MetricsProvider metricsProvider,
-            int podSetControllerWorkQueueSize
+            int podSetControllerWorkQueueSize,
+            boolean isStretchConfigured,
+            String centralClusterId
     ) {
         this.podOperator = podOperator;
         this.strimziPodSetOperator = strimziPodSetOperator;
@@ -128,6 +135,9 @@ public class StrimziPodSetController implements Runnable {
         this.podInformer = podOperator.informer(watchedNamespace, POD_LABEL_SELECTOR, DEFAULT_RESYNC_PERIOD_MS);
 
         this.controllerThread = new Thread(this, "StrimziPodSetController");
+
+        this.isStretchConfigured = isStretchConfigured;
+        this.centralClusterId = centralClusterId;
     }
 
     protected ControllerMetricsHolder metrics()   {
@@ -274,6 +284,9 @@ public class StrimziPodSetController implements Runnable {
      * @return          True if the StrimziPodSet's Kafka cluster matches the selector labels
      */
     private boolean matchesCrSelector(StrimziPodSet podSet)    {
+        if (PodSetUtils.isRemotePodSet(podSet, isStretchConfigured, centralClusterId)) {
+            return true;
+        }
         if (podSet.getMetadata().getLabels() != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_KIND_LABEL) != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_CLUSTER_LABEL) != null) {
@@ -294,6 +307,7 @@ public class StrimziPodSetController implements Runnable {
     }
 
     private HasMetadata findCustomResource(StrimziPodSet podSet)    {
+
         String customResourceName = podSet.getMetadata().getLabels().get(Labels.STRIMZI_CLUSTER_LABEL);
         HasMetadata cr = null;
 

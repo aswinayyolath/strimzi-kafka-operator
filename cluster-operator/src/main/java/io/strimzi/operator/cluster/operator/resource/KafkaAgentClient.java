@@ -118,16 +118,24 @@ public class KafkaAgentClient {
     }
 
     /**
-     * Gets broker state by sending HTTP request to the /v1/broker-state endpoint of the KafkaAgent
+     * Gets broker state, of a broker in a given cluster
+     * by sending HTTP request to the /v1/broker-state endpoint of the KafkaAgent
      *
-     * @param podName Name of the pod to interact with
+     * @param podName           Name of the pod to interact with
+     * @param targetClusterId   The cluster Id where the broker resides
      * @return A BrokerState that contains broker state and recovery progress.
      *         -1 is returned for broker state if the http request failed or returned non 200 response.
      *         Null value is returned for recovery progress if broker state is not 2 (RECOVERY).
      */
-    public BrokerState getBrokerState(String podName) {
+    public BrokerState getBrokerState(String podName, String targetClusterId) {
         BrokerState brokerstate = new BrokerState(-1, null);
-        String host = DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(cluster), podName);
+        String host;
+
+        if (targetClusterId != null)
+            host = DnsNameGenerator.podDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(cluster), podName);
+        else
+            host = DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(cluster), podName);
+
         try {
             URI uri = new URI("https", null, host, KAFKA_AGENT_HTTPS_PORT, BROKER_STATE_REST_PATH, null, null);
             brokerstate = MAPPER.readValue(doGet(uri), BrokerState.class);
@@ -139,5 +147,17 @@ public class KafkaAgentClient {
             LOGGER.warnCr(reconciliation, "Failed to get broker state", e);
         }
         return brokerstate;
+    }
+
+    /**
+     * Gets broker state by sending HTTP request to the /v1/broker-state endpoint of the KafkaAgent
+     *
+     * @param podName Name of the pod to interact with
+     * @return A BrokerState that contains broker state and recovery progress.
+     *         -1 is returned for broker state if the http request failed or returned non 200 response.
+     *         Null value is returned for recovery progress if broker state is not 2 (RECOVERY).
+     */
+    public BrokerState getBrokerState(String podName) {
+        return getBrokerState(podName, null);
     }
 }

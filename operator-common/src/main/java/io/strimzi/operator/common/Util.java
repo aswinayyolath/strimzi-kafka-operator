@@ -7,6 +7,8 @@ package io.strimzi.operator.common;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LabelSelector;
 import io.fabric8.kubernetes.api.model.Secret;
+import io.strimzi.api.ResourceAnnotations;
+import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.OrderedProperties;
@@ -537,5 +539,15 @@ public class Util {
      */
     public static String fromAsciiBytes(byte[] bytes) {
         return new String(bytes, StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * Checks if stretch cluster is enabled via strimzi.io/enable-stretch-cluster annotation.
+     *
+     * @param kafka The Kafka custom resource which might have the enable-stretch-cluster annotation
+     * @return True if kafka cr enables stretch cluster
+     */
+    public static boolean isStretchModeEnabled(Kafka kafka) {
+        return Annotations.booleanAnnotation(kafka, ResourceAnnotations.ANNO_STRIMZI_ENABLE_STRETCH_CLUSTER, false);
     }
 }

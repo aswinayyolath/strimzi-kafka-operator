@@ -24,6 +24,7 @@ import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
+import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.StatusUtils;
 import io.vertx.core.Future;
@@ -46,6 +47,7 @@ public class KafkaClusterCreator {
     private final Reconciliation reconciliation;
     private final KafkaVersion.Lookup versions;
 
+    private final ClusterOperatorConfig config;
     // Operators and other tools
     private final Vertx vertx;
     private final AdminClientProvider adminClientProvider;
@@ -74,6 +76,7 @@ public class KafkaClusterCreator {
     ) {
         this.reconciliation = reconciliation;
         this.versions = config.versions();
+        this.config = config;
 
         this.vertx = vertx;
         this.adminClientProvider = supplier.adminClientProvider;
@@ -163,6 +166,20 @@ public class KafkaClusterCreator {
             Map<String, Storage> oldStorage,
             KafkaVersionChange versionChange
     )   {
+
+        boolean isStretchMode = Util.isStretchModeEnabled(kafkaCr);
+
+        if (isStretchMode) {
+            // Stretch clusters are handled by StretchClusterReconciler, not this path
+            // Validation is performed in StretchClusterValidator
+            throw new InvalidResourceException(
+                String.format("Stretch mode is enabled for Kafka cluster '%s'. " +
+                    "Stretch clusters should be delegated to StretchClusterReconciler in KafkaAssemblyOperator. " +
+                    "This code path should not be reached.",
+                    kafkaCr.getMetadata().getName())
+            );
+        }
+
         return Future.succeededFuture(createKafkaCluster(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, versions, sharedEnvironmentProvider));
     }
 
@@ -329,6 +346,8 @@ public class KafkaClusterCreator {
         // NOTE: this is important to drive the right validation happening in node pools (i.e. roles on node pools, storage, number of controllers, ...)
         List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, sharedEnvironmentProvider);
         String clusterId = NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs);
-        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, versionChange, clusterId, sharedEnvironmentProvider);
+
+        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, null, versionChange, clusterId, sharedEnvironmentProvider);
     }
+
 }

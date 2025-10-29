@@ -13,6 +13,7 @@ import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.KafkaVersion;
+import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.model.RestartReason;
 import io.strimzi.operator.cluster.model.RestartReasons;
@@ -135,6 +136,9 @@ public class KafkaRoller {
     private Admin controllerAdminClient;
     private KafkaAgentClient kafkaAgentClient;
 
+    private boolean isStretchMode = false;
+    private String targetClusterId;
+
     /**
      * Constructor
      *
@@ -178,6 +182,17 @@ public class KafkaRoller {
         this.kafkaVersion = kafkaVersion;
         this.reconciliation = reconciliation;
         this.allowReconfiguration = allowReconfiguration;
+    }
+
+    /**
+     * Initializes brokerAdminClient, if it has not been initialized yet
+     * @param targetClusterId test
+     * @return true if the creation of AC succeeded, false otherwise
+     */
+    public KafkaRoller withStretch(String targetClusterId) {
+        this.isStretchMode = true;
+        this.targetClusterId = targetClusterId;
+        return this;
     }
 
     private final ScheduledExecutorService singleExecutor = Executors.newSingleThreadScheduledExecutor(
@@ -430,7 +445,12 @@ public class KafkaRoller {
                     this.kafkaAgentClient = initKafkaAgentClient();
                 }
 
-                BrokerState brokerState = kafkaAgentClient.getBrokerState(pod.getMetadata().getName());
+                BrokerState brokerState;
+                if (isStretchMode)
+                    brokerState = kafkaAgentClient.getBrokerState(pod.getMetadata().getName(), ModelUtils.getTargetClusterAlias(pod));
+                else
+                    brokerState = kafkaAgentClient.getBrokerState(pod.getMetadata().getName());
+
                 if (brokerState.isBrokerInRecovery()) {
                     throw new UnforceableProblem("Pod " + nodeRef.podName() + " is not ready because the Kafka node is performing log recovery. There are " + brokerState.remainingLogsToRecover() + " logs and " + brokerState.remainingSegmentsToRecover() + " segments left to recover.", e.getCause());
                 }
@@ -920,7 +940,10 @@ public class KafkaRoller {
         if (nodes.isEmpty()) {
             bootstrapHostnames = String.format("%s:%s", DnsNameGenerator.of(namespace, KafkaResources.bootstrapServiceName(cluster)).serviceDnsName(), KafkaCluster.REPLICATION_PORT);
         } else {
-            bootstrapHostnames = nodes.stream().map(node -> DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(cluster), node.podName()) + ":" + KafkaCluster.REPLICATION_PORT).collect(Collectors.joining(","));
+            if (isStretchMode)
+                bootstrapHostnames = nodes.stream().map(node -> DnsNameGenerator.podDnsNameWithClusterId(node.clusterId(), namespace, KafkaResources.brokersServiceName(cluster), node.podName()) + ":" + KafkaCluster.REPLICATION_PORT).collect(Collectors.joining(","));
+            else
+                bootstrapHostnames = nodes.stream().map(node -> DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(cluster), node.podName()) + ":" + KafkaCluster.REPLICATION_PORT).collect(Collectors.joining(","));
         }
 
         try {

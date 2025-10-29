@@ -50,6 +50,32 @@ public class ConfigMapUtils {
     }
 
     /**
+     * Creates a Config Map without owner references
+     *
+     * @param name              Name of the Config Map
+     * @param namespace         Namespace of the Config Map
+     * @param labels            Labels of the Config Map
+     * @param data              Data which will be stored in the Config Map
+     *
+     * @return  New Config Map
+     */
+    public static ConfigMap createRemoteConfigMap(
+            String name,
+            String namespace,
+            Labels labels,
+            Map<String, String> data
+    ) {
+        return new ConfigMapBuilder()
+                .withNewMetadata()
+                    .withName(name)
+                    .withNamespace(namespace)
+                    .withLabels(labels.toMap())
+                .endMetadata()
+                .withData(data)
+                .build();
+    }
+
+    /**
      * Generates a metrics and logging ConfigMap according to configured defaults. This is used with most operands, but
      * not all of them. Kafka brokers have own methods in the KafkaCluster class. So does the Bridge. And Kafka Exporter
      * has no metrics or logging ConfigMap at all.

@@ -133,4 +133,17 @@ public class ResourceAnnotations {
      * If missing or with an invalid value, the cluster is assumed to be ZooKeeper-based
      */
     public static final String ANNO_STRIMZI_IO_KRAFT = STRIMZI_DOMAIN + "kraft";
+
+    /**
+     * Annotation for specifying the target Kubernetes cluster where the resources are to be deployed.
+     * This annotation is used on the KafkaNodePool CR.
+     */
+    public static final String ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS = STRIMZI_DOMAIN + "stretch-cluster-alias";
+
+
+    /**
+     * Annotation for enabling stretch cluster functionality.
+     * This annotation is used on the Kafka CR.
+     */
+    public static final String ANNO_STRIMZI_ENABLE_STRETCH_CLUSTER = STRIMZI_DOMAIN + "enable-stretch-cluster";
 }

@@ -427,7 +427,7 @@ public class CruiseControl extends AbstractModel implements SupportsMetrics, Sup
         Map<String, CertAndKey> ccCerts = new HashMap<>(4);
         LOGGER.debugCr(reconciliation, "Generating certificates");
         try {
-            Set<NodeRef> nodes = Set.of(new NodeRef(CruiseControl.COMPONENT_TYPE, 0, null, false, false));
+            Set<NodeRef> nodes = Set.of(new NodeRef(CruiseControl.COMPONENT_TYPE, 0, null, null, false, false));
             ccCerts = clusterCa.generateCcCerts(namespace, clusterName,
                     // Only pass existing certificates if the CA cert generation hasn't changed since they were generated
                     clusterCa.hasCaCertGenerationChanged(existingSecret) ? Map.of() : CertUtils.extractCertsAndKeysFromSecret(existingSecret, nodes),

@@ -9,6 +9,7 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.strimzi.certs.OpenSslCertManager;
 import io.strimzi.operator.cluster.leaderelection.LeaderElectionManager;
+import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.model.securityprofiles.PodSecurityProviderFactory;
 import io.strimzi.operator.cluster.operator.assembly.KafkaAssemblyOperator;
 import io.strimzi.operator.cluster.operator.assembly.KafkaBridgeAssemblyOperator;
@@ -16,6 +17,10 @@ import io.strimzi.operator.cluster.operator.assembly.KafkaConnectAssemblyOperato
 import io.strimzi.operator.cluster.operator.assembly.KafkaMirrorMaker2AssemblyOperator;
 import io.strimzi.operator.cluster.operator.assembly.KafkaRebalanceAssemblyOperator;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
+import io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier;
+import io.strimzi.operator.cluster.stretch.StretchNetworkingProviderFactory;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.MetricsProvider;
 import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.strimzi.operator.common.OperatorKubernetesClientBuilder;
@@ -35,7 +40,9 @@ import org.apache.logging.log4j.Logger;
 
 import java.security.Security;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -81,10 +88,28 @@ public class Main {
         MetricsProvider metricsProvider = new MicrometerMetricsProvider(BackendRegistries.getDefaultNow());
         KubernetesClient client = new OperatorKubernetesClientBuilder("strimzi-cluster-operator", strimziVersion).build();
 
+        RemoteClientSupplier remoteClientSupplier = RemoteClientSupplier.buildFromClusterInfo(
+                config.getOperatorNamespace(),
+                config.getRemoteClusters(),
+                new SecretOperator(vertx, client)
+            );
+
         startHealthServer(vertx, metricsProvider)
                 .compose(i -> leaderElection(client, config, shutdownHook))
-                .compose(i -> createPlatformFeaturesAvailability(vertx, client))
-                .compose(pfa -> deployClusterOperatorVerticles(vertx, client, metricsProvider, pfa, config, shutdownHook))
+                .compose(i -> {
+                    Future<PlatformFeaturesAvailability> defaultPfa =  createPlatformFeaturesAvailability(vertx, client);
+                    Future<Map<String, PlatformFeaturesAvailability>> remotePfa = createRemotePlatformFeaturesAvailability(vertx, remoteClientSupplier);
+
+                    return Future.join(defaultPfa, remotePfa)
+                            .compose(pfas -> {
+                                // Initialize stretch networking provider after PFA is available
+                                RemoteResourceOperatorSupplier remoteResourceOperatorSupplier =
+                                    initializeStretchNetworkingProvider(config, vertx, client, remoteClientSupplier, pfas.resultAt(0), pfas.resultAt(1));
+
+                                return deployClusterOperatorVerticles(vertx, client, remoteClientSupplier, metricsProvider, pfas.resultAt(0), config, shutdownHook, pfas.resultAt(1), remoteResourceOperatorSupplier);
+                            })
+                            .mapEmpty();
+                })
                 .onComplete(res -> {
                     if (res.failed())   {
                         LOGGER.error("Unable to start operator for 1 or more namespace", res.cause());
@@ -119,25 +144,135 @@ public class Main {
     }
 
     /**
+     * Creates PlatformFeaturesAvailability for all configured remote clusters.
+     *
+     * @param vertx   Vert.x instance
+     * @param clients RemoteClientSupplier with clients for each remote cluster
+     * @return Future containing a map of cluster ID to PlatformFeaturesAvailability
+     */
+    private static Future<Map<String, PlatformFeaturesAvailability>> createRemotePlatformFeaturesAvailability(Vertx vertx, RemoteClientSupplier clients)    {
+        Map<String, PlatformFeaturesAvailability> remotePfas = new HashMap<>();
+        List<Future<PlatformFeaturesAvailability>> pfaFutures = new ArrayList<>();
+
+
+        for (Map.Entry<String, KubernetesClient> targetClusterClient : clients.getRemoteClients().entrySet()) {
+            pfaFutures.add(PlatformFeaturesAvailability
+                .create(vertx, targetClusterClient.getValue(), true)
+                .compose(pfaResult -> {
+                    remotePfas.put(targetClusterClient.getKey(), pfaResult);
+                    return Future.succeededFuture();
+                }));
+        }
+
+        return Future.join(pfaFutures)
+                .map(x -> remotePfas);
+    }
+
+    /**
+     * Initialize stretch networking provider if stretch cluster configuration is present.
+     * This must be called before creating any assembly operators.
+     *
+     * @param config Cluster operator configuration
+     * @param vertx Vertx instance
+     * @param client Kubernetes client for central cluster
+     * @param remoteClientSupplier Supplier for remote cluster clients
+     * @param centralPfa Platform features availability for central cluster
+     * @param remotePfas Platform features availability for remote clusters
+     * @return RemoteResourceOperatorSupplier if stretch is configured, null otherwise
+     */
+    private static RemoteResourceOperatorSupplier initializeStretchNetworkingProvider(
+            ClusterOperatorConfig config,
+            Vertx vertx,
+            KubernetesClient client,
+            RemoteClientSupplier remoteClientSupplier,
+            PlatformFeaturesAvailability centralPfa,
+            Map<String, PlatformFeaturesAvailability> remotePfas) {
+
+        // Only initialize if stretch cluster configuration is valid
+        if (!config.isStretchClusterConfigurationValid()) {
+            LOGGER.debug("Stretch cluster configuration not valid. Skipping provider initialization.");
+            return null;
+        }
+
+        try {
+            // Load provider configuration from ConfigMap if specified
+            Map<String, String> providerConfig = new HashMap<>();
+            String configMapName = config.get(ClusterOperatorConfig.STRETCH_NETWORK_CONFIG_MAP);
+            if (configMapName != null && !configMapName.isEmpty()) {
+                // TODO: Load config from ConfigMap
+                LOGGER.info("Provider configuration from ConfigMap '{}' will be loaded", configMapName);
+            }
+
+            // Create RemoteResourceOperatorSupplier for remote clusters
+            RemoteResourceOperatorSupplier remoteResourceOperatorSupplier = new RemoteResourceOperatorSupplier(
+                vertx,
+                client,
+                remoteClientSupplier,
+                remotePfas,
+                config.getOperatorName(),
+                config.getCentralClusterId()
+            );
+
+            // Create central cluster supplier
+            ResourceOperatorSupplier centralSupplier = new ResourceOperatorSupplier(
+                vertx,
+                client,
+                new MicrometerMetricsProvider(BackendRegistries.getDefaultNow()),
+                centralPfa,
+                new HashMap<>(),  // No remote PFAs for central supplier
+                config.getOperatorName(),
+                null  // No remote client supplier for central
+            );
+
+            // Create and initialize the provider
+            StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
+                config,
+                providerConfig,
+                centralSupplier,
+                remoteResourceOperatorSupplier
+            );
+
+            // Set the provider globally in DnsNameGenerator
+            DnsNameGenerator.setStretchProvider(provider);
+
+            LOGGER.info("Stretch networking provider '{}' initialized successfully", provider.getProviderName());
+
+            return remoteResourceOperatorSupplier;
+
+        } catch (Exception e) {
+            LOGGER.error("Failed to initialize stretch networking provider. Stretch cluster functionality may not work correctly.", e);
+            // Don't fail startup - allow operator to start but stretch clusters won't work
+            return null;
+        }
+    }
+
+    /**
      * Deploys the ClusterOperator verticles responsible for the actual Cluster Operator functionality. One verticle is
      * started for each namespace the operator watched. In case of watching the whole cluster, only one verticle is started.
      *
      * @param vertx             Vertx instance
      * @param client            Kubernetes client instance
+     * @param remoteClientSupplier Remote client supplier
      * @param metricsProvider   Metrics provider instance
      * @param pfa               PlatformFeaturesAvailability instance describing the Kubernetes cluster
      * @param config            Cluster Operator configuration
      * @param shutdownHook      Shutdown hook to register leader election shutdown
+     * @param remotePfas        Remote PlatformFeaturesAvailability
+     * @param remoteResourceOperatorSupplier Remote resource operator supplier (null if stretch not configured)
      *
      * @return  Future which completes when all Cluster Operator verticles are started and running
      */
-    static CompositeFuture deployClusterOperatorVerticles(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, ClusterOperatorConfig config, ShutdownHook shutdownHook) {
+    static CompositeFuture deployClusterOperatorVerticles(Vertx vertx, KubernetesClient client, RemoteClientSupplier remoteClientSupplier, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, ClusterOperatorConfig config, ShutdownHook shutdownHook, Map<String, PlatformFeaturesAvailability> remotePfas, RemoteResourceOperatorSupplier remoteResourceOperatorSupplier) {
+        // Create ResourceOperatorSupplier with remote cluster support
+        // Pass empty map and null if no remote clusters configured
         ResourceOperatorSupplier resourceOperatorSupplier = new ResourceOperatorSupplier(
                 vertx,
                 client,
                 metricsProvider,
                 pfa,
-                config.getOperatorName()
+                remotePfas != null ? remotePfas : new HashMap<>(),
+                config.getOperatorName(),
+                remoteClientSupplier  // Can be null if no remote clusters
         );
 
         // Initialize the PodSecurityProvider factory to provide the user configured provider
@@ -159,6 +294,11 @@ public class Main {
                             "0123456789");
 
             kafkaClusterOperations = new KafkaAssemblyOperator(vertx, pfa, certManager, passwordGenerator, resourceOperatorSupplier, config);
+
+            // Add stretch capabilities if configured
+            if (remoteResourceOperatorSupplier != null) {
+                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remotePfas, remoteResourceOperatorSupplier);
+            }
             kafkaConnectClusterOperations = new KafkaConnectAssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaMirrorMaker2AssemblyOperator = new KafkaMirrorMaker2AssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaBridgeAssemblyOperator = new KafkaBridgeAssemblyOperator(vertx, pfa, certManager, passwordGenerator, resourceOperatorSupplier, config);

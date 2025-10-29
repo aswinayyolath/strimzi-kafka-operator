@@ -80,13 +80,14 @@ public class CaReconciler {
 
     // Fields based on the Kafka CR required for the reconciliation
     private final List<String> maintenanceWindows;
-    private final OwnerReference ownerRef;
     private final CertificateAuthority clusterCaConfig;
     private final CertificateAuthority clientsCaConfig;
     private final Map<String, String> caLabels;
     private final Labels clusterOperatorSecretLabels;
     private final Map<String, String> clusterCaCertLabels;
     private final Map<String, String> clusterCaCertAnnotations;
+
+    private OwnerReference ownerRef;
 
     // Fields used to store state during the reconciliation
     private ClusterCa clusterCa;
@@ -95,6 +96,12 @@ public class CaReconciler {
 
     /* test */ boolean isClusterCaNeedFullTrust;
     /* test */ boolean isClusterCaFullyUsed;
+
+    boolean isStretchMode = false;
+    String targetClusterId;
+    SecretOperator remoteSecretOperator;
+    StrimziPodSetOperator remotePodSetOperator;
+    PodOperator remotePodOperator;
 
     /**
      * Constructs the CA reconciler which reconciles the Cluster and Client CAs
@@ -148,6 +155,45 @@ public class CaReconciler {
         this.clusterOperatorSecretLabels = Labels.generateDefaultLabels(kafkaCr, Labels.APPLICATION_NAME, Labels.APPLICATION_NAME, AbstractModel.STRIMZI_CLUSTER_OPERATOR_NAME);
         this.clusterCaCertLabels = clusterCaCertLabels(kafkaCr);
         this.clusterCaCertAnnotations = clusterCaCertAnnotations(kafkaCr);
+    }
+
+    /**
+     * Configures the CaReconciler for "stretch mode" reconciliation in a remote cluster.
+     * When CA's are reconciled in the remote cluster, this function sets:
+     * - isStretchMode to true
+     * - ownerRef to null
+     * - remoteSecretOperator to the provided remote secret operator.
+     *
+     * @param remoteSecretOperator  The SecretOperator instance for the remote cluster where CAs will be reconciled.
+     * @param remotePodSetOperator  The StrimziPodSetOperator instance for the remote cluster where CAs will be reconciled.
+     * @param remotePodOperator     The PodOperator instance for the remote cluster where CAs will be reconciled.
+     * @param clusterCa             The Cluster CA of the kafka cluster, created at the central cluster
+     * @param clientsCa             The Client CA of the kafka cluster, created at the central cluster
+     * @param targetClusterId       The target cluster Id where the certs are to be reconciled
+     * @return The same CaReconciler object, updated with the stretch configuration.
+     */
+    public CaReconciler withStretchConfig(SecretOperator remoteSecretOperator, StrimziPodSetOperator remotePodSetOperator, PodOperator remotePodOperator, ClusterCa clusterCa, ClientsCa clientsCa, String targetClusterId) {
+        this.remoteSecretOperator = remoteSecretOperator;
+        this.remotePodSetOperator = remotePodSetOperator;
+        this.remotePodOperator = remotePodOperator;
+        this.isStretchMode = true;
+        this.ownerRef = null;
+        this.clusterCa = clusterCa;
+        this.clientsCa = clientsCa;
+        this.targetClusterId = targetClusterId;
+        return this;
+    }
+
+    private SecretOperator getSecretOperator() {
+        return isStretchMode ? remoteSecretOperator : secretOperator;
+    }
+
+    private StrimziPodSetOperator getPodSetOperator() {
+        return isStretchMode ? remotePodSetOperator : strimziPodSetOperator;
+    }
+
+    private PodOperator getPodOperator() {
+        return isStretchMode ? remotePodOperator : podOperator;
     }
 
     /**
@@ -223,7 +269,7 @@ public class CaReconciler {
         String clientsCaCertName = KafkaResources.clientsCaCertificateSecretName(reconciliation.name());
         String clientsCaKeyName = KafkaResources.clientsCaKeySecretName(reconciliation.name());
 
-        return secretOperator.listAsync(reconciliation.namespace(), Labels.EMPTY.withStrimziKind(reconciliation.kind()).withStrimziCluster(reconciliation.name()))
+        return getSecretOperator().listAsync(reconciliation.namespace(), Labels.EMPTY.withStrimziKind(reconciliation.kind()).withStrimziCluster(reconciliation.name()))
                 .compose(clusterSecrets -> {
                     Secret clusterCaCertSecret = null;
                     Secret clusterCaKeySecret = null;
@@ -243,25 +289,27 @@ public class CaReconciler {
                         }
                     }
 
-                    clusterCa = new ClusterCa(reconciliation, certManager, passwordGenerator, reconciliation.name(), clusterCaCertSecret,
-                            clusterCaKeySecret,
-                            ModelUtils.getCertificateValidity(clusterCaConfig),
-                            ModelUtils.getRenewalDays(clusterCaConfig),
-                            clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority(), clusterCaConfig != null ? clusterCaConfig.getCertificateExpirationPolicy() : null);
+                    if (!isStretchMode)
+                        clusterCa = new ClusterCa(reconciliation, certManager, passwordGenerator, reconciliation.name(), clusterCaCertSecret,
+                                clusterCaKeySecret,
+                                ModelUtils.getCertificateValidity(clusterCaConfig),
+                                ModelUtils.getRenewalDays(clusterCaConfig),
+                                clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority(), clusterCaConfig != null ? clusterCaConfig.getCertificateExpirationPolicy() : null);
                     clusterCa.createRenewOrReplace(
                             reconciliation.namespace(), caLabels,
                             clusterCaCertLabels, clusterCaCertAnnotations,
                             clusterCaConfig != null && !clusterCaConfig.isGenerateSecretOwnerReference() ? null : ownerRef,
                             Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant()));
 
-                    clientsCa = new ClientsCa(reconciliation, certManager,
-                            passwordGenerator, clientsCaCertName,
-                            clientsCaCertSecret, clientsCaKeyName,
-                            clientsCaKeySecret,
-                            ModelUtils.getCertificateValidity(clientsCaConfig),
-                            ModelUtils.getRenewalDays(clientsCaConfig),
-                            clientsCaConfig == null || clientsCaConfig.isGenerateCertificateAuthority(),
-                            clientsCaConfig != null ? clientsCaConfig.getCertificateExpirationPolicy() : null);
+                    if (!isStretchMode)
+                        clientsCa = new ClientsCa(reconciliation, certManager,
+                                passwordGenerator, clientsCaCertName,
+                                clientsCaCertSecret, clientsCaKeyName,
+                                clientsCaKeySecret,
+                                ModelUtils.getCertificateValidity(clientsCaConfig),
+                                ModelUtils.getRenewalDays(clientsCaConfig),
+                                clientsCaConfig == null || clientsCaConfig.isGenerateCertificateAuthority(),
+                                clientsCaConfig != null ? clientsCaConfig.getCertificateExpirationPolicy() : null);
                     clientsCa.createRenewOrReplace(reconciliation.namespace(),
                             caLabels, Map.of(), Map.of(),
                             clientsCaConfig != null && !clientsCaConfig.isGenerateSecretOwnerReference() ? null : ownerRef,
@@ -272,14 +320,14 @@ public class CaReconciler {
                     List<Future<ReconcileResult<Secret>>> secretReconciliations = new ArrayList<>(2);
 
                     if (clusterCaConfig == null || clusterCaConfig.isGenerateCertificateAuthority())   {
-                        Future<ReconcileResult<Secret>> clusterSecretReconciliation = secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCa.caCertSecret())
-                                .compose(ignored -> secretOperator.reconcile(reconciliation, reconciliation.namespace(), clusterCaKeyName, clusterCa.caKeySecret()));
+                        Future<ReconcileResult<Secret>> clusterSecretReconciliation = getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCa.caCertSecret())
+                                .compose(ignored -> getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clusterCaKeyName, clusterCa.caKeySecret()));
                         secretReconciliations.add(clusterSecretReconciliation);
                     }
 
                     if (clientsCaConfig == null || clientsCaConfig.isGenerateCertificateAuthority())   {
-                        Future<ReconcileResult<Secret>> clientsSecretReconciliation = secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaCertName, clientsCa.caCertSecret())
-                                .compose(ignored -> secretOperator.reconcile(reconciliation, reconciliation.namespace(), clientsCaKeyName, clientsCa.caKeySecret()));
+                        Future<ReconcileResult<Secret>> clientsSecretReconciliation = getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clientsCaCertName, clientsCa.caCertSecret())
+                                .compose(ignored -> getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clientsCaKeyName, clientsCa.caKeySecret()));
                         secretReconciliations.add(clientsSecretReconciliation);
                     }
 
@@ -304,7 +352,7 @@ public class CaReconciler {
      *                 That time is used for checking maintenance windows
      */
     Future<Void> reconcileClusterOperatorSecret(Clock clock) {
-        return secretOperator.getAsync(reconciliation.namespace(), KafkaResources.clusterOperatorCertsSecretName(reconciliation.name()))
+        return getSecretOperator().getAsync(reconciliation.namespace(), KafkaResources.clusterOperatorCertsSecretName(reconciliation.name()))
                 .compose(oldSecret -> {
                     coSecret = oldSecret;
                     if (oldSecret != null && this.isClusterCaNeedFullTrust) {
@@ -325,7 +373,7 @@ public class CaReconciler {
                             Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant())
                     );
 
-                    return secretOperator.reconcile(reconciliation, reconciliation.namespace(), KafkaResources.clusterOperatorCertsSecretName(reconciliation.name()), coSecret)
+                    return getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), KafkaResources.clusterOperatorCertsSecretName(reconciliation.name()), coSecret)
                             .mapEmpty();
                 });
     }
@@ -374,7 +422,7 @@ public class CaReconciler {
         // Building the selector for Kafka related components
         Labels labels =  Labels.forStrimziCluster(reconciliation.name()).withStrimziKind(Kafka.RESOURCE_KIND);
 
-        return podOperator.listAsync(reconciliation.namespace(), labels)
+        return getPodOperator().listAsync(reconciliation.namespace(), labels)
                 .compose(pods -> {
 
                     // still no Pods, a new Kafka cluster is under creation
@@ -438,7 +486,7 @@ public class CaReconciler {
                 .withStrimziCluster(reconciliation.name())
                 .withStrimziName(KafkaResources.kafkaComponentName(reconciliation.name()));
 
-        return strimziPodSetOperator.listAsync(reconciliation.namespace(), selectorLabels)
+        return getPodSetOperator().listAsync(reconciliation.namespace(), selectorLabels)
                 .compose(podSets -> {
                     if (podSets != null) {
                         List<StrimziPodSet> updatedPodSets = podSets
@@ -447,7 +495,7 @@ public class CaReconciler {
                                         podSet,
                                         Map.of(Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, String.valueOf(clusterCa.caKeyGeneration()))
                                 )).toList();
-                        return strimziPodSetOperator.batchReconcile(reconciliation, reconciliation.namespace(), updatedPodSets, selectorLabels)
+                        return getPodSetOperator().batchReconcile(reconciliation, reconciliation.namespace(), updatedPodSets, selectorLabels)
                                 .map(i -> updatedPodSets.stream().flatMap(podSet -> ReconcilerUtils.nodesFromPodSet(podSet).stream())
                                 .collect(Collectors.toSet()));
                     } else {
@@ -457,23 +505,24 @@ public class CaReconciler {
     }
 
     /* test */ Future<Void> rollKafkaBrokers(Set<NodeRef> nodes, RestartReasons podRollReasons, TlsPemIdentity coTlsPemIdentity) {
-        return createKafkaRoller(nodes, coTlsPemIdentity).rollingRestart(pod -> {
-            int clusterCaKeyGeneration = clusterCa.caKeyGeneration();
-            int podClusterCaKeyGeneration = Annotations.intAnnotation(pod, Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, clusterCaKeyGeneration);
-            if (clusterCaKeyGeneration == podClusterCaKeyGeneration) {
-                LOGGER.debugCr(reconciliation, "Not rolling Pod {} since the Cluster CA cert key generation is correct.", pod.getMetadata().getName());
-                return RestartReasons.empty();
-            } else {
-                LOGGER.debugCr(reconciliation, "Rolling Pod {} due to {}", pod.getMetadata().getName(), podRollReasons.getReasons());
-                return podRollReasons;
-            }
-        });
+        return (isStretchMode ? createStretchKafkaRoller(nodes, coTlsPemIdentity) : createKafkaRoller(nodes, coTlsPemIdentity))
+            .rollingRestart(pod -> {
+                int clusterCaKeyGeneration = clusterCa.caKeyGeneration();
+                int podClusterCaKeyGeneration = Annotations.intAnnotation(pod, Ca.ANNO_STRIMZI_IO_CLUSTER_CA_KEY_GENERATION, clusterCaKeyGeneration);
+                if (clusterCaKeyGeneration == podClusterCaKeyGeneration) {
+                    LOGGER.debugCr(reconciliation, "Not rolling Pod {} since the Cluster CA cert key generation is correct.", pod.getMetadata().getName());
+                    return RestartReasons.empty();
+                } else {
+                    LOGGER.debugCr(reconciliation, "Rolling Pod {} due to {}", pod.getMetadata().getName(), podRollReasons.getReasons());
+                    return podRollReasons;
+                }
+            });
     }
 
     /* test */ KafkaRoller createKafkaRoller(Set<NodeRef> nodes, TlsPemIdentity coTlsPemIdentity) {
         return new KafkaRoller(reconciliation,
                 vertx,
-                podOperator,
+                getPodOperator(),
                 1_000,
                 operationTimeoutMs,
                 () -> new BackOff(250, 2, 10),
@@ -486,6 +535,25 @@ public class CaReconciler {
                 null,
                 false,
                 eventPublisher);
+    }
+
+    /* test */ KafkaRoller createStretchKafkaRoller(Set<NodeRef> nodes, TlsPemIdentity coTlsPemIdentity) {
+        return new KafkaRoller(reconciliation,
+                vertx,
+                getPodOperator(),
+                1_000,
+                operationTimeoutMs,
+                () -> new BackOff(250, 2, 10),
+                nodes,
+                coTlsPemIdentity,
+                adminClientProvider,
+                kafkaAgentClientProvider,
+                brokerId -> null,
+                null,
+                null,
+                false,
+                eventPublisher)
+                .withStretch(targetClusterId);
     }
 
     /**
@@ -519,7 +587,7 @@ public class CaReconciler {
             clusterCa.maybeDeleteOldCerts();
 
             if (clusterCa.certsRemoved()) {
-                return secretOperator.reconcile(reconciliation, reconciliation.namespace(), AbstractModel.clusterCaCertSecretName(reconciliation.name()), clusterCa.caCertSecret())
+                return getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), AbstractModel.clusterCaCertSecretName(reconciliation.name()), clusterCa.caCertSecret())
                         .mapEmpty();
             } else {
                 return Future.succeededFuture();

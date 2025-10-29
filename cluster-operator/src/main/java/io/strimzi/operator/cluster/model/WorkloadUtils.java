@@ -26,11 +26,13 @@ import io.strimzi.api.kafka.model.common.template.PodTemplate;
 import io.strimzi.api.kafka.model.common.template.ResourceTemplate;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
 import io.strimzi.api.kafka.model.podset.StrimziPodSetBuilder;
+import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.Labels;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -139,14 +141,17 @@ public class WorkloadUtils {
      * @param name           Name of the PodSet
      * @param namespace      Namespace of the PodSet
      * @param labels         Labels of the PodSet
-     * @param ownerReference OwnerReference of the PodSet
+     * @param ownerReference OwnerReference of the PodSet. This may be cleared if the PodSet is configured for a remote stretch cluster.
      * @param template       PodSet template with user's custom configuration
      * @param nodes          List of node references
      * @param annotations    Additional annotations which should be set on the PodSet. This might contain annotations
-     *                       for tracking storage configuration, Kafka versions and similar.
+     *                       for tracking storage configuration, Kafka versions, Indicates remote SPS, and similar.
      * @param selectorLabels Labels used for the Pod selector in the StrimziPodSetSpec
      * @param podCreator     Function for generating the Pods which should be included in this PodSet based on the node
      *                       reference.
+     * @param targetClusterId   ID of the target cluster where the PodSet will be applied. If it differs from the central
+     *                          cluster ID, the PodSet will be modified for stretch configuration (e.g., cleared owner references).
+     * @param centralClusterId  ID of the central cluster, used to determine stretch mode for PodSet transformation.
      *
      * @return Created PodSet
      */
@@ -159,7 +164,9 @@ public class WorkloadUtils {
             Set<NodeRef> nodes,
             Map<String, String> annotations,
             Labels selectorLabels,
-            Function<NodeRef, Pod> podCreator
+            Function<NodeRef, Pod> podCreator,
+            String targetClusterId,
+            String centralClusterId
     )  {
         List<Map<String, Object>> pods = new ArrayList<>();
 
@@ -168,7 +175,8 @@ public class WorkloadUtils {
             pods.add(PodSetUtils.podToMap(pod));
         }
 
-        return new StrimziPodSetBuilder()
+
+        StrimziPodSetBuilder podSetBuilder = new StrimziPodSetBuilder()
                 .withNewMetadata()
                     .withName(name)
                     .withLabels(labels.withAdditionalLabels(TemplateUtils.labels(template)).toMap())
@@ -179,8 +187,27 @@ public class WorkloadUtils {
                 .withNewSpec()
                     .withSelector(new LabelSelectorBuilder().withMatchLabels(selectorLabels.toMap()).build())
                     .withPods(pods)
-                .endSpec()
-                .build();
+                .endSpec();
+
+        boolean isRemoteCluster =
+                centralClusterId != null &&
+                        targetClusterId != null &&
+                        !centralClusterId.equals(targetClusterId);
+
+        if (isRemoteCluster) {
+            podSetBuilder
+                    .editMetadata()
+                        .withOwnerReferences(Collections.emptyList())
+                        .addToAnnotations(Annotations.ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS, targetClusterId)
+                    .endMetadata();
+        } else if (targetClusterId != null) {
+            podSetBuilder
+                    .editMetadata()
+                        .addToAnnotations(Annotations.ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS, targetClusterId)
+                    .endMetadata();
+        }
+
+        return podSetBuilder.build();
     }
 
     /**

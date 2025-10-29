@@ -16,6 +16,7 @@ import io.strimzi.api.kafka.model.common.template.IpFamilyPolicy;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.Labels;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -139,7 +140,7 @@ public class ServiceUtils {
             List<IpFamily> ipFamilies,
             Boolean publishNotReadyAddresses
     )   {
-        return new ServiceBuilder()
+        ServiceBuilder serviceBuilder = new ServiceBuilder()
                 .withNewMetadata()
                     .withName(name)
                     .withLabels(labels.withAdditionalLabels(Util.mergeLabelsOrAnnotations(additionalLabels, TemplateUtils.labels(template))).toMap())
@@ -154,8 +155,16 @@ public class ServiceUtils {
                     .withIpFamilyPolicy(ipFamilyPolicyToString(ipFamilyPolicy))
                     .withIpFamilies(ipFamiliesToListOfStrings(ipFamilies))
                     .withPublishNotReadyAddresses(publishNotReadyAddresses)
-                .endSpec()
-                .build();
+                .endSpec();
+
+        if (ownerReference == null) {
+            serviceBuilder
+                .editMetadata()
+                    .withOwnerReferences(Collections.emptyList())
+                .endMetadata();
+        }
+
+        return serviceBuilder.build();
     }
 
     /**
@@ -178,7 +187,7 @@ public class ServiceUtils {
             InternalServiceTemplate template,
             List<ServicePort> ports
     )   {
-        return new ServiceBuilder()
+        ServiceBuilder serviceBuilder = new ServiceBuilder()
                 .withNewMetadata()
                     .withName(name)
                     .withLabels(labels.withAdditionalLabels(TemplateUtils.labels(template)).toMap())
@@ -194,8 +203,16 @@ public class ServiceUtils {
                     .withPublishNotReadyAddresses(true)
                     .withIpFamilyPolicy(ipFamilyPolicyToString(ipFamilyPolicy(template)))
                     .withIpFamilies(ipFamiliesToListOfStrings(ipFamilies(template)))
-                .endSpec()
-                .build();
+                .endSpec();
+
+        if (ownerReference == null) {
+            serviceBuilder
+                .editMetadata()
+                    .withOwnerReferences(Collections.emptyList())
+                .endMetadata();
+        }
+
+        return serviceBuilder.build();
     }
 
     private static String ipFamilyPolicyToString(IpFamilyPolicy ipFamilyPolicy)  {

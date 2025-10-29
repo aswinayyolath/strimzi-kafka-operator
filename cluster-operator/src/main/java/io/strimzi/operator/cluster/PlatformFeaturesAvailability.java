@@ -39,11 +39,26 @@ public class PlatformFeaturesAvailability implements PlatformFeatures {
      * @return  Instance of PlatformFeaturesAvailability
      */
     public static Future<PlatformFeaturesAvailability> create(Vertx vertx, KubernetesClient client) {
+        return create(vertx, client, false);
+    }
+
+    /**
+     * Asynchronously creates a {@link PlatformFeaturesAvailability} instance, which captures the set of
+     * Kubernetes platform features supported by the given cluster
+     *
+     * @param vertx     Vert.x instance used for asynchronous execution
+     * @param client    Kubernetes client connected to the target cluster
+     * @param isRemote  {@code true} if the target cluster is a remote (non-local) cluster, {@code false} otherwise
+     *
+     * @return A {@link Future} that completes with the {@link PlatformFeaturesAvailability} for the specified cluster
+     */
+    public static Future<PlatformFeaturesAvailability> create(Vertx vertx, KubernetesClient client, boolean isRemote) {
+
         Promise<PlatformFeaturesAvailability> pfaPromise = Promise.promise();
 
         PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability();
 
-        Future<VersionInfo> futureVersion = getVersionInfo(vertx, client);
+        Future<VersionInfo> futureVersion = getVersionInfo(vertx, client, isRemote);
 
         futureVersion.compose(versionInfo -> {
             String major = versionInfo.getMajor().isEmpty() ? Integer.toString(KubernetesVersion.MINIMAL_SUPPORTED_MAJOR) : versionInfo.getMajor();
@@ -90,12 +105,12 @@ public class PlatformFeaturesAvailability implements PlatformFeatures {
      * @param client    Fabric8 Kubernetes client
      * @return  Future with the VersionInfo object describing the Kubernetes version
      */
-    private static Future<VersionInfo> getVersionInfo(Vertx vertx, KubernetesClient client) {
+    private static Future<VersionInfo> getVersionInfo(Vertx vertx, KubernetesClient client, boolean isRemote) {
         Future<VersionInfo> futureVersion;
 
         String kubernetesVersion = System.getenv("STRIMZI_KUBERNETES_VERSION");
 
-        if (kubernetesVersion != null) {
+        if (kubernetesVersion != null && !isRemote) {
             try {
                 futureVersion = Future.succeededFuture(parseVersionInfo(kubernetesVersion));
             } catch (ParseException e) {
