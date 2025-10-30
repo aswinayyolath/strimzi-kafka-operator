@@ -4,11 +4,8 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
-import io.fabric8.kubernetes.api.model.LoadBalancerStatus;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
-import io.fabric8.kubernetes.api.model.ServiceSpec;
-import io.fabric8.kubernetes.api.model.ServiceStatus;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
 import io.fabric8.openshift.api.model.Route;
 import io.strimzi.api.kafka.model.common.CertAndKeySecretSource;
@@ -39,18 +36,14 @@ import io.vertx.core.Future;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static java.util.Collections.singletonList;
 
@@ -66,20 +59,11 @@ public class KafkaListenersReconciler {
     private final KafkaCluster kafka;
     private final ClusterCa clusterCa;
     private final PlatformFeaturesAvailability pfa;
-    private Map<String, PlatformFeaturesAvailability> remotePfas;
 
     private final SecretOperator secretOperator;
     private final ServiceOperator serviceOperator;
     private final RouteOperator routeOperator;
     private final IngressOperator ingressOperator;
-
-    private Map<String, ServiceOperator> stretchServiceOperators;
-    private Map<String, RouteOperator> stretchRouteOperators;
-    private Map<String, IngressOperator> stretchIngressOperators;
-
-    private boolean isStretchMode = false;
-    private List<String> targetClusterIds;
-    private String centralClusterId;
 
     /* test */ final ReconciliationResult result;
 
@@ -128,41 +112,6 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Sets up attributes for stretch cluster kafka listener reconciler
-     *
-     * @param targetClusterIds          The Target cluster ID fot a stretched kafka clusters
-     * @param centralClusterId          The central cluter ID for a stretched kafka clusters
-     * @param remotePfas                Object that describes the environment remote clusters run in
-     * @param stretchSecretOperators    A map of target cluster IDs to their corresponding SecretOperator instances for a stretched Kafka cluster
-     * @param stretchServiceOperators   A map of target cluster IDs to their corresponding ServiceOperator instances for a stretched Kafka cluster
-     * @param stretchRouteOperators     A map of target cluster IDs to their corresponding RouteOperator instances for a stretched Kafka cluster
-     * @param stretchIngressOperators   A map of target cluster IDs to their corresponding IngressOperator instances for a stretched Kafka cluster
-     *
-     * @return  Returns a KafkaListenersReconciler instance with stretch cluster setup.
-     */
-    public KafkaListenersReconciler withStretchConfig(
-        List<String> targetClusterIds,
-        String centralClusterId,
-        Map<String, PlatformFeaturesAvailability> remotePfas,
-        Map<String, SecretOperator> stretchSecretOperators,
-        Map<String, ServiceOperator> stretchServiceOperators,
-        Map<String, RouteOperator> stretchRouteOperators,
-        Map<String, IngressOperator> stretchIngressOperators
-    ) {
-        this.stretchServiceOperators = stretchServiceOperators;
-        this.stretchRouteOperators = stretchRouteOperators;
-        this.stretchIngressOperators = stretchIngressOperators;
-
-        this.isStretchMode = true;
-        this.targetClusterIds = targetClusterIds;
-        this.centralClusterId = centralClusterId;
-
-        this.remotePfas = remotePfas;
-
-        return this;
-    }
-
-    /**
      * The main reconciliation method which triggers the whole reconciliation pipeline. This is the method which is
      * expected to be called from the outside to trigger the reconciliation.
      *
@@ -170,14 +119,14 @@ public class KafkaListenersReconciler {
      *          which contains the collected addresses, prepared listener statuses etc.
      */
     public Future<ReconciliationResult> reconcile()    {
-        return (isStretchMode ? stretchServices() : services())
-                .compose(i -> (isStretchMode ? stretchRoutes() : routes()))
-                .compose(i -> (isStretchMode ? stretchIngresses() : ingresses()))
+        return services()
+                .compose(i -> routes())
+                .compose(i -> ingresses())
                 .compose(i -> internalServicesReady())
-                .compose(i -> (isStretchMode ? stretchLoadBalancerServicesReady() : loadBalancerServicesReady()))
-                .compose(i -> (isStretchMode ? stretchNodePortServicesReady() : nodePortServicesReady()))
-                .compose(i -> (isStretchMode ? stretchRoutesReady() : routesReady()))
-                .compose(i -> (isStretchMode ? stretchIngressesReady() : ingressesReady()))
+                .compose(i -> loadBalancerServicesReady())
+                .compose(i -> nodePortServicesReady())
+                .compose(i -> routesReady())
+                .compose(i -> ingressesReady())
                 .compose(i -> clusterIPServicesReady())
                 .compose(i -> customListenerCertificates())
                 // This method should be called only after customListenerCertificates
@@ -223,61 +172,6 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Makes sure all desired services are updated and the rest are deleted for a stretch cluster configuration.
-     * This includes the regular headless, node-port, or load balancer services.
-     *
-     * @return Future which completes when all services in all the clusters are created or deleted.
-     */
-    protected Future<Void> stretchServices() {
-        List<Future<Void>> futures = new ArrayList<>();
-
-        List<Service> commonServicesWithOwnerReference = generateDefaultServices(false);
-        List<Service> commonServicesWithoutOwnerReference = generateDefaultServices(true);
-
-        Map<String, List<Service>> clusteredPerBrokerServices = kafka.generateClusteredPerPodServices();
-
-        for (String targetClusterId : this.targetClusterIds) {
-            boolean isCentralCluster = targetClusterId.equals(centralClusterId);
-
-            List<Service> commonServices = isCentralCluster
-                    ? commonServicesWithOwnerReference
-                    : commonServicesWithoutOwnerReference;
-
-            List<Service> perBrokerServices = clusteredPerBrokerServices.getOrDefault(targetClusterId, Collections.emptyList());
-
-            List<Service> services = Stream.concat(commonServices.stream(), perBrokerServices.stream())
-                                        .collect(Collectors.toList());
-
-            futures.add(selectServiceOperator(targetClusterId)
-                    .batchReconcile(
-                        reconciliation,
-                        reconciliation.namespace(),
-                        services,
-                        kafka.getSelectorLabels()
-                    )
-                    .mapEmpty()
-            );
-        }
-
-        return Future.join(futures).mapEmpty();
-    }
-
-    /**
-     * Generates a list of common services (service, headless service, external bootstrap services)
-     * based on whether owner references should be included.
-     *
-     * @param withOwnerReference Whether to include owner references on the services.
-     * @return List of common services.
-     */
-    private List<Service> generateDefaultServices(boolean withOwnerReference) {
-        List<Service> services = new ArrayList<>();
-        services.add(kafka.generateService(withOwnerReference));
-        services.add(kafka.generateHeadlessService(withOwnerReference));
-        services.addAll(kafka.generateExternalBootstrapServices(withOwnerReference));
-        return services;
-    }
-
-    /**
      * Makes sure all desired services are updated and the rest is deleted. This method updates all services in one go
      *           => the regular headless, node-port or load balancer ones.
      *
@@ -315,53 +209,6 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Makes sure all desired routes in the central and remote clusters are updated and the rest is deleted.
-     *
-     * @return Future which completes when all routes are created or deleted.
-     */
-    protected Future<Void> stretchRoutes() {
-        boolean hasPfaOnEveryCluster = remotePfas.entrySet().stream().allMatch(x -> x.getValue().hasRoutes());
-
-
-        List<Future<Void>> futures = new ArrayList<>();
-
-        List<Route> bootstrapRoutesWithOwnerReferences = kafka.generateExternalBootstrapRoutes(false);
-        List<Route> bootstrapRoutesWithoutOwnerReferences = kafka.generateExternalBootstrapRoutes(true);
-
-        Map<String, List<Route>> clusteredRoutes = kafka.generateClusteredExternalRoutes();
-
-        if (!hasPfaOnEveryCluster) {
-            if (!bootstrapRoutesWithOwnerReferences.isEmpty()) {
-                LOGGER.warnCr(reconciliation, "The OpenShift route API is not available in this Kubernetes cluster. Exposing Kafka cluster {} using routes is not possible.", reconciliation.name());
-                return Future.failedFuture("The OpenShift route API is not available in this Kubernetes cluster. Exposing Kafka cluster " + reconciliation.name() + " using routes is not possible.");
-            } else {
-                return Future.succeededFuture();
-            }
-        }
-
-        for (String targetClusterId : this.targetClusterIds) {
-            boolean isCentralCluster = targetClusterId.equals(centralClusterId);
-            List<Route> routes = Stream.concat(
-                                                    (isCentralCluster ?
-                                                        bootstrapRoutesWithOwnerReferences :
-                                                        bootstrapRoutesWithoutOwnerReferences
-                                                    ).stream(),
-                                                    clusteredRoutes.get(targetClusterId).stream()
-                                                )
-                                            .collect(Collectors.toList());
-            futures.add(
-                (isCentralCluster ? routeOperator : stretchRouteOperators.get(targetClusterId))
-                .batchReconcile(
-                    reconciliation,
-                    reconciliation.namespace(),
-                    routes,
-                    kafka.getSelectorLabels()
-                ).mapEmpty());
-        }
-        return Future.join(futures).mapEmpty();
-    }
-
-    /**
      * Makes sure all desired ingresses are updated and the rest is deleted.
      *
      * @return  Future which completes when all ingresses are created or deleted.
@@ -372,51 +219,6 @@ public class KafkaListenersReconciler {
 
         return ingressOperator.batchReconcile(reconciliation, reconciliation.namespace(), ingresses, kafka.getSelectorLabels()).mapEmpty();
     }
-
-    /**
-     * Reconciles the desired Ingress resources in both central and remote clusters by ensuring all required Ingresses
-     * are created or updated, and any obsolete ones are deleted.
-     *
-     * @return Future that completes when all Ingress resources have been reconciled across clusters.
-     */
-    protected Future<Void> stretchIngresses() {
-        List<Future<Void>> futures = new ArrayList<>();
-
-        List<Ingress> bootstrapIngressesWithOwnerReferences = kafka.generateExternalBootstrapIngresses(false);
-        List<Ingress> bootstrapIngressesWithoutOwnerReferences = kafka.generateExternalBootstrapIngresses(true);
-
-        Map<String, List<Ingress>> clusteredIngresses = kafka.generateClusteredExternalIngresses();
-
-        for (String targetClusterId : this.targetClusterIds) {
-            boolean isCentralCluster = targetClusterId.equals(centralClusterId);
-
-            List<Ingress> bootstrapIngresses = isCentralCluster
-                    ? bootstrapIngressesWithOwnerReferences
-                    : bootstrapIngressesWithoutOwnerReferences;
-
-            List<Ingress> perBrokerIngresses = clusteredIngresses.getOrDefault(targetClusterId, Collections.emptyList());
-
-            List<Ingress> ingresses = Stream.concat(bootstrapIngresses.stream(), perBrokerIngresses.stream())
-                                            .collect(Collectors.toList());
-
-            IngressOperator operator = isCentralCluster
-                    ? ingressOperator
-                    : Objects.requireNonNull(stretchIngressOperators.get(targetClusterId),
-                        "Missing stretchIngressOperator for clusterId: " + targetClusterId);
-
-            futures.add(
-                operator.batchReconcile(
-                    reconciliation,
-                    reconciliation.namespace(),
-                    ingresses,
-                    kafka.getSelectorLabels()
-                ).mapEmpty()
-            );
-        }
-
-        return Future.join(futures).mapEmpty();
-    }
-
 
     /**
      * Utility method which helps to register the advertised hostnames for a specific listener of a specific broker.
@@ -488,21 +290,6 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Generates the hostname of an internal service with or without the DNS suffix
-     * and with the cluster ID
-     *
-     * @param clusterId             The cluster Id of the internal service
-     * @param namespace             Namespace of the service
-     * @param serviceName           Name of the service
-     * @param useServiceDnsDomain   Flag indicating whether the address should contain the DNS suffix or not
-     *
-     * @return  The DNS name of the service
-     */
-    private static String getInternalServiceHostnameWithClusterId(String clusterId, String namespace, String serviceName, boolean useServiceDnsDomain)    {
-        return DnsNameGenerator.serviceDnsNameWithClusterDomainAndClusterId(clusterId, namespace, serviceName);
-    }
-
-    /**
      * Checks the readiness of the internal services. The internal services are ready out of the box and there is no
      * need to wait for them. But this method at least collects their addresses for the reconciliation result and
      * prepares the listener statuses.
@@ -530,9 +317,7 @@ public class KafkaListenersReconciler {
             for (NodeRef node : kafka.brokerNodes()) {
                 String brokerAddress;
 
-                if (isStretchMode) {
-                    brokerAddress = DnsNameGenerator.podDnsNameWithClusterDomainAndClusterId(node.clusterId(), reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), node.podName());
-                } else if (useServiceDnsDomain) {
+                if (useServiceDnsDomain) {
                     brokerAddress = DnsNameGenerator.podDnsNameWithClusterDomain(reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), node.podName());
                 } else {
                     brokerAddress = DnsNameGenerator.podDnsNameWithoutClusterDomain(reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), node.podName());
@@ -584,22 +369,11 @@ public class KafkaListenersReconciler {
             for (NodeRef node : kafka.brokerNodes()) {
                 String brokerServiceName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener);
 
-                String brokerAddress;
-
-                if (isStretchMode) {
-                    brokerAddress = getInternalServiceHostnameWithClusterId(
-                        node.clusterId(),
-                        reconciliation.namespace(),
-                        brokerServiceName,
-                        useServiceDnsDomain
-                    );
-                } else {
-                    brokerAddress = getInternalServiceHostname(
-                        reconciliation.namespace(),
-                        brokerServiceName,
-                        useServiceDnsDomain
-                    );
-                }
+                String brokerAddress = getInternalServiceHostname(
+                    reconciliation.namespace(),
+                    brokerServiceName,
+                    useServiceDnsDomain
+                );
 
                 String userConfiguredAdvertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
 
@@ -618,146 +392,6 @@ public class KafkaListenersReconciler {
 
         return Future.succeededFuture();
     }
-
-    /**
-     * Ensures all load balancer services across clusters are provisioned and ready.
-     * For each load balancer-type listener:
-     * <ol>
-     *   <li>Checks if the bootstrap service has been provisioned and has an ingress address</li>
-     *   <li>Collects addresses for certificates and Kafka CR status</li>
-     *   <li>Checks if broker services are provisioned and collect their addresses</li>
-     *   <li>Stores broker addresses for use in advertised listeners and certificates</li>
-     * </ol>
-     *
-     * @return Future which completes when all load balancer services are ready and addresses are collected.
-     */
-    protected Future<Void> stretchLoadBalancerServicesReady() {
-        List<GenericKafkaListener> loadBalancerListeners = ListenersUtils.loadBalancerListeners(kafka.getListeners());
-        List<Future<Void>> listenerFutures = new ArrayList<>(loadBalancerListeners.size());
-
-        for (GenericKafkaListener listener : loadBalancerListeners) {
-            String bootstrapServiceName = ListenersUtils.backwardsCompatibleBootstrapServiceName(reconciliation.name(), listener);
-            List<String> bootstrapListenerAddressList = new ArrayList<>();
-
-            Future<Void> perListenerFuture = Future.succeededFuture()
-                .compose(ignore -> {
-                    if (ListenersUtils.skipCreateBootstrapService(listener)) {
-                        return Future.succeededFuture();
-                    }
-
-                    List<Future<?>> addressFutures = new ArrayList<>();
-                    for (String clusterId : targetClusterIds) {
-                        addressFutures.add(selectServiceOperator(clusterId).hasIngressAddress(
-                            reconciliation,
-                            reconciliation.namespace(),
-                            bootstrapServiceName,
-                            1_000,
-                            operationTimeoutMs
-                        ));
-                    }
-
-                    return Future.join(addressFutures).compose(joined -> {
-                        List<Future<Service>> bootstrapServices = targetClusterIds.stream()
-                            .map(clusterId -> selectServiceOperator(clusterId).getAsync(reconciliation.namespace(), bootstrapServiceName))
-                            .collect(Collectors.toList());
-                        return Future.join(bootstrapServices);
-                    }).compose(servicesResult -> {
-                        for (Object svcObj : servicesResult.result().list()) {
-                            Service svc = (Service) svcObj;
-                            String bootstrapAddress = extractLoadBalancerAddress(svc);
-                            if (bootstrapAddress != null) {
-                                LOGGER.debugCr(reconciliation, "Found address {} for Service {}", bootstrapAddress, bootstrapServiceName);
-                                result.bootstrapDnsNames.add(bootstrapAddress);
-                                bootstrapListenerAddressList.add(bootstrapAddress);
-                            }
-                        }
-                        return Future.succeededFuture();
-                    });
-                })
-                .compose(res -> {
-                    List<Future<Void>> perPodFutures = kafka.brokerNodes().stream()
-                        .map(node -> selectServiceOperator(node.clusterId()).hasIngressAddress(
-                            reconciliation,
-                            reconciliation.namespace(),
-                            ListenersUtils.backwardsCompatiblePerBrokerServiceName(ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener),
-                            1_000,
-                            operationTimeoutMs))
-                        .collect(Collectors.toList());
-                    return Future.join(perPodFutures);
-                })
-                .compose(ignore -> {
-                    List<Future<Object>> perPodFutures = kafka.brokerNodes().stream()
-                        .map(node -> selectServiceOperator(node.clusterId())
-                            .getAsync(reconciliation.namespace(), ListenersUtils.backwardsCompatiblePerBrokerServiceName(ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener))
-                            .compose(service -> {
-                                Service svc = (Service) service;
-                                String brokerAddress = extractLoadBalancerAddress(svc);
-
-                                if (brokerAddress != null) {
-                                    LOGGER.debugCr(reconciliation, "Found address {} for Service {}", brokerAddress, svc.getMetadata().getName());
-                                    if (ListenersUtils.skipCreateBootstrapService(listener)) {
-                                        bootstrapListenerAddressList.add(brokerAddress);
-                                    }
-                                    result.brokerDnsNames.computeIfAbsent(node.nodeId(), k -> new HashSet<>(2)).add(brokerAddress);
-
-                                    String advertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
-                                    if (advertisedHostname != null) {
-                                        result.brokerDnsNames.get(node.nodeId()).add(advertisedHostname);
-                                    }
-
-                                    registerAdvertisedHostname(node.nodeId(), listener, advertisedHostname, brokerAddress);
-                                    registerAdvertisedPort(node.nodeId(), listener, listener.getPort());
-                                }
-
-                                return Future.succeededFuture().mapEmpty();
-                            }))
-                        .collect(Collectors.toList());
-                    return Future.join(perPodFutures);
-                })
-                .compose(res -> {
-                    ListenerStatus ls = new ListenerStatusBuilder()
-                        .withName(listener.getName())
-                        .withAddresses(bootstrapListenerAddressList.stream()
-                            .map(address -> new ListenerAddressBuilder()
-                                .withHost(address)
-                                .withPort(listener.getPort())
-                                .build())
-                            .collect(Collectors.toList()))
-                        .build();
-                    result.listenerStatuses.add(ls);
-                    return Future.succeededFuture();
-                });
-
-            listenerFutures.add(perListenerFuture);
-        }
-
-        return Future.join(listenerFutures).mapEmpty();
-    }
-
-    /**
-     * Extracts the hostname or IP address from the first ingress entry of the service's LoadBalancer status.
-     *
-     * @param svc The Kubernetes Service resource.
-     * @return The hostname if present, otherwise the IP address; or null if no ingress is available.
-     */
-    private String extractLoadBalancerAddress(Service svc) {
-        return Optional.ofNullable(svc.getStatus())
-                .map(ServiceStatus::getLoadBalancer)
-                .map(LoadBalancerStatus::getIngress)
-                .filter(ingresses -> !ingresses.isEmpty())
-                .map(ingresses -> ingresses.get(0))
-                .map(ingress ->
-                    ingress.getHostname() != null ? ingress.getHostname() : ingress.getIp()
-                )
-                .orElse(null);
-    }
-
-    private ServiceOperator selectServiceOperator(String clusterId) {
-        return clusterId.equals(centralClusterId)
-            ? serviceOperator
-            : Objects.requireNonNull(stretchServiceOperators.get(clusterId), "Missing operator for cluster " + clusterId);
-    }
-
 
     /**
      * Makes sure all services related to load balancers are ready and collects their addresses for Statuses,
@@ -868,105 +502,6 @@ public class KafkaListenersReconciler {
     }
 
     /**
-     * Ensures all NodePort services are ready in all clusters and collects their ports for status,
-     * certificates, and advertised addresses.
-     *
-     * @return Future completing when all NodePort services are ready and ports are collected.
-     */
-    protected Future<Void> stretchNodePortServicesReady() {
-        List<GenericKafkaListener> nodePortListeners = ListenersUtils.nodePortListeners(kafka.getListeners());
-        List<Future<?>> listenerFutures = new ArrayList<>(nodePortListeners.size());
-
-        for (GenericKafkaListener listener : nodePortListeners) {
-            String bootstrapServiceName = ListenersUtils.backwardsCompatibleBootstrapServiceName(reconciliation.name(), listener);
-
-            // Step 1: Wait until all bootstrap NodePort services are provisioned
-            List<Future<?>> readinessChecks = targetClusterIds.stream()
-                .map(clusterId -> selectServiceOperator(clusterId)
-                    .hasNodePort(reconciliation, reconciliation.namespace(), bootstrapServiceName, 1_000, operationTimeoutMs))
-                .collect(Collectors.toList());
-
-            Future listenerFuture = Future.join(readinessChecks)
-                // Step 2: Fetch bootstrap NodePort services and collect ports
-                .compose(ignore -> {
-                    List<Future<Service>> bootstrapServices = targetClusterIds.stream()
-                        .map(clusterId -> selectServiceOperator(clusterId)
-                            .getAsync(reconciliation.namespace(), bootstrapServiceName))
-                        .collect(Collectors.toList());
-
-                    return Future.join(bootstrapServices);
-                })
-                .compose(servicesFuture -> {
-                    servicesFuture.result().list().forEach(service -> {
-                        Integer nodePort = extractNodePort((Service) service);
-                        if (nodePort != null) {
-                            LOGGER.debugCr(reconciliation, "Found node port {} for Service {}", nodePort, bootstrapServiceName);
-                            result.bootstrapNodePorts.put(ListenersUtils.identifier(listener), nodePort);
-                        }
-                    });
-                    return Future.succeededFuture();
-                })
-                // Step 3: Collect broker node ports and advertised hostnames
-                .compose(ignore -> {
-                    List<Future<Object>> brokerFutures = kafka.brokerNodes().stream()
-                        .map(node -> {
-                            String serviceName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(
-                                ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener
-                            );
-
-                            return selectServiceOperator(node.clusterId())
-                                .getAsync(reconciliation.namespace(), serviceName)
-                                .compose(svc -> {
-                                    Integer nodePort = extractNodePort(svc);
-
-                                    String advertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
-
-                                    if (nodePort != null) {
-                                        LOGGER.debugCr(reconciliation, "Found node port {} for Service {}", nodePort, svc.getMetadata().getName());
-
-                                        if (advertisedHostname != null) {
-                                            result.brokerDnsNames.computeIfAbsent(node.nodeId(), k -> new HashSet<>(1)).add(advertisedHostname);
-                                        }
-
-                                        registerAdvertisedPort(node.nodeId(), listener, nodePort);
-                                        registerAdvertisedHostname(node.nodeId(), listener,
-                                            advertisedHostname,
-                                            nodePortAddressEnvVar(listener));
-                                    }
-                                    return Future.succeededFuture();
-                                });
-                        }).collect(Collectors.toList());
-
-                    return Future.join(brokerFutures);
-                }).compose(res -> {
-                    ListenerStatus ls = new ListenerStatusBuilder()
-                            .withName(listener.getName())
-                            .build();
-                    result.listenerStatuses.add(ls);
-
-                    return Future.succeededFuture();
-                });
-
-            listenerFutures.add(listenerFuture);
-        }
-
-        return Future.join(listenerFutures).mapEmpty();
-    }
-
-    /**
-     * Utility to extract the first NodePort from a Service, null-safe.
-     */
-    private Integer extractNodePort(Service svc) {
-        return Optional.ofNullable(svc)
-                .map(Service::getSpec)
-                .map(ServiceSpec::getPorts)
-                .filter(ports -> !ports.isEmpty())
-                .map(ports -> ports.get(0).getNodePort())
-                .orElse(null);
-    }
-
-
-    /**
      * Makes sure all services related to node ports are ready and collects their addresses for Statuses,
      * certificates and advertised addresses. This method for all NodePort type listeners:
      *      1) Checks if the bootstrap service has been provisioned (has a node port)
@@ -1045,114 +580,6 @@ public class KafkaListenersReconciler {
         return Future
                 .join(listenerFutures)
                 .mapEmpty();
-    }
-
-    /**
-     * Ensures all Routes are ready in all clusters and collects their addresses for Statuses,
-     * certificates, and advertised addresses.
-     *
-     * @return Future completing when all Routes are ready and addresses are collected.
-     */
-    protected Future<Void> stretchRoutesReady() {
-        List<GenericKafkaListener> routeListeners = ListenersUtils.routeListeners(kafka.getListeners());
-        List<Future<?>> listenerFutures = new ArrayList<>(routeListeners.size());
-
-        for (GenericKafkaListener listener : routeListeners) {
-            String bootstrapRouteName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(reconciliation.name(), listener);
-
-            // Step 1: Wait until all bootstrap routes are ready
-            List<Future<?>> bootstrapRouteReadinessFutures = targetClusterIds.stream()
-                .map(clusterId -> selectRouteOperator(clusterId)
-                    .hasAddress(reconciliation, reconciliation.namespace(), bootstrapRouteName, 1_000, operationTimeoutMs))
-                .collect(Collectors.toList());
-
-            Future perListenerFuture = Future.join(bootstrapRouteReadinessFutures)
-                // Step 2: Collect bootstrap addresses
-                .compose(ignore -> {
-                    List<Future<Route>> bootstrapRoutes = targetClusterIds.stream()
-                        .map(clusterId -> selectRouteOperator(clusterId)
-                            .getAsync(reconciliation.namespace(), bootstrapRouteName))
-                        .collect(Collectors.toList());
-                    return Future.join(bootstrapRoutes);
-                })
-                .compose(routesFuture -> {
-                    List<Route> routes = routesFuture.result().list();
-                    for (Route route : routes) {
-                        String host = extractRouteHost(route);
-                        if (host != null) {
-                            LOGGER.debugCr(reconciliation, "Found address {} for Route {}", host, bootstrapRouteName);
-
-                            result.bootstrapDnsNames.add(host);
-
-                            ListenerStatus listenerStatus = new ListenerStatusBuilder()
-                                .withName(listener.getName())
-                                .withAddresses(new ListenerAddressBuilder()
-                                    .withHost(host)
-                                    .withPort(KafkaCluster.ROUTE_PORT)
-                                    .build())
-                                .build();
-                            result.listenerStatuses.add(listenerStatus);
-                        }
-                    }
-                    return Future.succeededFuture();
-                })
-                // Step 3: Per-broker routes
-                .compose(ignore -> {
-                    List<Future<Object>> brokerFutures = kafka.brokerNodes().stream()
-                        .map(node -> {
-                            String brokerRouteName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(
-                                ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener);
-
-                            return selectRouteOperator(node.clusterId())
-                                .getAsync(reconciliation.namespace(), brokerRouteName)
-                                .compose(route -> {
-                                    String host = extractRouteHost(route);
-                                    if (host != null) {
-                                        LOGGER.debugCr(reconciliation, "Found address {} for Route {}", host, route.getMetadata().getName());
-
-                                        result.brokerDnsNames
-                                            .computeIfAbsent(node.nodeId(), k -> new HashSet<>(2))
-                                            .add(host);
-
-                                        String advertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
-                                        if (advertisedHostname != null) {
-                                            result.brokerDnsNames.get(node.nodeId()).add(advertisedHostname);
-                                        }
-
-                                        registerAdvertisedHostname(node.nodeId(), listener, advertisedHostname, host);
-                                        registerAdvertisedPort(node.nodeId(), listener, KafkaCluster.ROUTE_PORT);
-                                    }
-                                    return Future.succeededFuture();
-                                });
-                        }).collect(Collectors.toList());
-
-                    return Future.join(brokerFutures);
-                });
-
-            listenerFutures.add(perListenerFuture);
-        }
-
-        return Future.join(listenerFutures).mapEmpty();
-    }
-
-    /**
-     * Safely extracts the host from the Route status.
-     */
-    private String extractRouteHost(Route route) {
-        if (route != null && route.getStatus() != null
-                && route.getStatus().getIngress() != null
-                && !route.getStatus().getIngress().isEmpty()
-                && route.getStatus().getIngress().get(0).getHost() != null) {
-            return route.getStatus().getIngress().get(0).getHost();
-        }
-        return null;
-    }
-
-    /**
-     * Selects the appropriate RouteOperator based on cluster ID.
-     */
-    private RouteOperator selectRouteOperator(String clusterId) {
-        return centralClusterId.equals(clusterId) ? routeOperator : stretchRouteOperators.get(clusterId);
     }
 
     /**
@@ -1239,90 +666,6 @@ public class KafkaListenersReconciler {
                 .join(listenerFutures)
                 .mapEmpty();
     }
-
-    /**
-     * Ensures all Ingresses are ready in all clusters and collects their addresses for Statuses,
-     * certificates, and advertised addresses.
-     *
-     * @return Future completing when all Ingresses are ready and addresses are collected.
-     */
-    protected Future<Void> stretchIngressesReady() {
-        List<GenericKafkaListener> ingressListeners = ListenersUtils.ingressListeners(kafka.getListeners());
-        List<Future<Void>> listenerFutures = new ArrayList<>(ingressListeners.size());
-
-        for (GenericKafkaListener listener : ingressListeners) {
-            String bootstrapIngressName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(reconciliation.name(), listener);
-
-            // Step 1: Wait until bootstrap ingress is provisioned in all clusters
-            List<Future<Void>> bootstrapIngressReadinessFutures = targetClusterIds.stream()
-                .map(clusterId -> selectIngressOperator(clusterId)
-                    .hasIngressAddress(reconciliation, reconciliation.namespace(), bootstrapIngressName, 1_000, operationTimeoutMs))
-                .collect(Collectors.toList());
-
-            Future<Void> perListenerFuture = Future.join(bootstrapIngressReadinessFutures)
-                // Step 2: Collect bootstrap addresses from ingress status
-                .compose(ignore -> {
-                    for (String clusterId : targetClusterIds) {
-                        String bootstrapAddress = listener.getConfiguration().getBootstrap().getHost(); // FIXME: must be replaced with actual ingress status
-                        LOGGER.debugCr(reconciliation, "Using address {} for Ingress {}", bootstrapAddress, bootstrapIngressName);
-                        result.bootstrapDnsNames.add(bootstrapAddress);
-
-                        ListenerStatus listenerStatus = new ListenerStatusBuilder()
-                            .withName(listener.getName())
-                            .withAddresses(new ListenerAddressBuilder()
-                                .withHost(bootstrapAddress)
-                                .withPort(KafkaCluster.INGRESS_PORT)
-                                .build())
-                            .build();
-                        result.listenerStatuses.add(listenerStatus);
-                    }
-
-                    // Step 3: Wait for broker ingresses to be ready
-                    List<Future<Void>> brokerReadinessFutures = kafka.brokerNodes().stream()
-                        .map(node -> selectIngressOperator(node.clusterId())
-                            .hasIngressAddress(
-                                reconciliation,
-                                reconciliation.namespace(),
-                                ListenersUtils.backwardsCompatiblePerBrokerServiceName(
-                                    ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener),
-                                1_000,
-                                operationTimeoutMs))
-                        .collect(Collectors.toList());
-
-                    return Future.join(brokerReadinessFutures);
-                })
-                // Step 4: Collect broker addresses and register advertised hostnames
-                .compose(ignore -> {
-                    for (NodeRef node : kafka.brokerNodes()) {
-                        String brokerAddress = ListenersUtils.brokerHost(listener, node); // FIXME: same here: don't blindly trust this
-                        String brokerIngressName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(
-                            ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener);
-
-                        LOGGER.debugCr(reconciliation, "Using address {} for Ingress {}", brokerAddress, brokerIngressName);
-
-                        result.brokerDnsNames.computeIfAbsent(node.nodeId(), k -> new HashSet<>(2)).add(brokerAddress);
-
-                        String advertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
-                        if (advertisedHostname != null) {
-                            result.brokerDnsNames.get(node.nodeId()).add(advertisedHostname);
-                        }
-
-                        registerAdvertisedHostname(node.nodeId(), listener, advertisedHostname, brokerAddress);
-                        registerAdvertisedPort(node.nodeId(), listener, KafkaCluster.INGRESS_PORT);
-                    }
-                    return Future.succeededFuture();
-                });
-
-            listenerFutures.add(perListenerFuture);
-        }
-
-        return Future.join(listenerFutures).mapEmpty();
-    }
-
-    private IngressOperator selectIngressOperator(String clusterId) {
-        return clusterId.equals(centralClusterId) ? ingressOperator : stretchIngressOperators.get(clusterId);
-    }
-
 
     /**
      * Makes sure all ingresses are ready and collects their addresses for Statuses,

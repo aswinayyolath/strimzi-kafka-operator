@@ -169,8 +169,6 @@ public class KafkaReconciler {
 
     private final KafkaAutoRebalanceStatus kafkaAutoRebalanceStatus;
 
-    private boolean isStretchMode;
-
     /**
      * Constructs the Kafka reconciler
      *
@@ -239,11 +237,6 @@ public class KafkaReconciler {
 
         this.adminClientProvider = supplier.adminClientProvider;
         this.kafkaAgentClientProvider = supplier.kafkaAgentClientProvider;
-
-        if (kafka.isStretchModeEnabled()) {
-            // Old stretch mode is deprecated - set flag to fail fast in reconcile()
-            this.isStretchMode = true;
-        }
     }
 
     /**
@@ -257,15 +250,6 @@ public class KafkaReconciler {
      * @return              Future which completes when the reconciliation completes
      */
     public Future<Void> reconcile(KafkaStatus kafkaStatus, Clock clock)    {
-        // NOTE: Stretch cluster mode now uses StretchClusterReconciler (pluggable architecture)
-        // If isStretchMode is true here, it means old stretch mode is being used, which is deprecated
-        if (isStretchMode) {
-            return Future.failedFuture(new UnsupportedOperationException(
-                "Old stretch cluster mode is deprecated. Please use the new pluggable stretch cluster mode " +
-                "by adding annotation 'strimzi.io/enable-stretch-cluster: true' to your Kafka CR."
-            ));
-        }
-
         return modelWarnings(kafkaStatus)
                 .compose(i -> initClientAuthenticationCertificates())
                 .compose(i -> manualPodCleaning())

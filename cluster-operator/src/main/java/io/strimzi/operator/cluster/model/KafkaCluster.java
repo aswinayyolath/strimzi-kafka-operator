@@ -68,8 +68,6 @@ import io.strimzi.api.kafka.model.kafka.quotas.QuotasPluginStrimzi;
 import io.strimzi.api.kafka.model.kafka.tieredstorage.TieredStorage;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolStatus;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
-import io.strimzi.api.kafka.model.serviceexport.ServiceExport;
-import io.strimzi.api.kafka.model.serviceexport.ServiceExportBuilder;
 import io.strimzi.certs.CertAndKey;
 import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.model.cruisecontrol.CruiseControlMetricsReporter;
@@ -1392,30 +1390,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      */
     public String getBrokerServiceName() {
         return KafkaResources.brokersServiceName(cluster);
-    }
-
-    /**
-     * Generates service export for the kafka broker service
-     * @param isRemoteResource     Indicates if this service is to be deployed in a remote cluster
-     *
-     * @return The generated ServiceExport
-     */
-    public ServiceExport generateServiceExport(boolean isRemoteResource) {
-        ServiceExportBuilder svcex = new ServiceExportBuilder()
-                        .withNewMetadata()
-                            .withName(KafkaResources.brokersServiceName(cluster))
-                            .withNamespace(namespace)
-                            .withOwnerReferences(ownerReference)
-                        .endMetadata();
-
-        if (isRemoteResource) {
-            svcex
-                .editMetadata()
-                    .withOwnerReferences(Collections.emptyList())
-                .endMetadata();
-        }
-
-        return svcex.build();
     }
 
     /**

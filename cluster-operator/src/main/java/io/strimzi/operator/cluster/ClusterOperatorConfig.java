@@ -10,6 +10,7 @@ import io.strimzi.operator.cluster.model.ImagePullPolicy;
 import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.cluster.model.NoImageException;
 import io.strimzi.operator.cluster.model.UnsupportedVersionException;
+import io.strimzi.operator.cluster.stretch.StretchClusterConfig;
 import io.strimzi.operator.common.InvalidConfigurationException;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.config.ConfigParameter;
@@ -19,8 +20,6 @@ import io.strimzi.operator.common.model.Labels;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.net.MalformedURLException;
-import java.net.URL;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -313,21 +312,9 @@ public class ClusterOperatorConfig {
     private final KafkaVersion.Lookup versions;
 
     /**
-     * Returns a map of remote Kubernetes cluster configurations.
-     * The key is the cluster ID, and the value is a {@link ClusterInfo} object containing
-     * the cluster URL and the name of the Kubernetes Secret with access credentials.
-     *
-     * @return A map of remote cluster configurations, or an empty map if no remote clusters are configured.
+     * Stretch cluster configuration (null if stretch is not configured)
      */
-    public Map<String, ClusterInfo> parseRemoteClusterConfigsFromEnv() {
-        String remoteKubeConfigValue = get(REMOTE_KUBE_CONFIG);
-        return parseRemoteClusterConfigs(remoteKubeConfigValue);
-    }
-
-    /**
-     * Variable for remoteClusters
-     */
-    private Map<String, ClusterInfo> remoteClusters;
+    private final StretchClusterConfig stretchConfig;
 
     /**
      * Gets the Linked Kubernetes cluster details.
@@ -335,7 +322,7 @@ public class ClusterOperatorConfig {
      * @return Map of remote cluster IDs to their respective Kubernetes configuration info.
      */
     public Map<String, ClusterInfo> getRemoteClusters() {
-        return remoteClusters;
+        return stretchConfig != null ? stretchConfig.getRemoteClusters() : new HashMap<>();
     }
 
     /**
@@ -359,71 +346,13 @@ public class ClusterOperatorConfig {
     }
 
     /**
-     * Validates stretch cluster configuration environment variables.
-     * All stretch-related variables must be set together or not set at all.
-     *
-     * @param map Map containing the environment variables.
-     */
-    private static void validateStretchClusterConfiguration(Map<String, String> map) {
-        boolean hasRemoteConfig = map.containsKey(STRIMZI_REMOTE_KUBE_CONFIG);
-        boolean hasCentralId = map.containsKey(STRIMZI_CENTRAL_CLUSTER_ID);
-        boolean hasNetworkingProvider = map.containsKey(STRIMZI_STRETCH_NETWORK_PROVIDER);
-
-        // Only STRIMZI_REMOTE_KUBE_CONFIG and STRIMZI_CENTRAL_CLUSTER_ID are required
-        // STRIMZI_STRETCH_NETWORK_PROVIDER is optional and defaults to "mcs"
-        if (hasRemoteConfig || hasCentralId) {
-            if (!hasRemoteConfig) {
-                throw new InvalidConfigurationException(
-                    "STRIMZI_REMOTE_KUBE_CONFIG must be set when configuring stretch clusters. " +
-                    "Required variables: STRIMZI_REMOTE_KUBE_CONFIG, STRIMZI_CENTRAL_CLUSTER_ID. " +
-                    "Optional: STRIMZI_STRETCH_NETWORK_PROVIDER (defaults to 'mcs')"
-                );
-            }
-            if (!hasCentralId) {
-                throw new InvalidConfigurationException(
-                    "STRIMZI_CENTRAL_CLUSTER_ID must be set when configuring stretch clusters. " +
-                    "Required variables: STRIMZI_REMOTE_KUBE_CONFIG, STRIMZI_CENTRAL_CLUSTER_ID. " +
-                    "Optional: STRIMZI_STRETCH_NETWORK_PROVIDER (defaults to 'mcs')"
-                );
-            }
-
-            // Validate networking provider value if provided
-            if (hasNetworkingProvider) {
-                String provider = map.get(STRIMZI_STRETCH_NETWORK_PROVIDER);
-                if (provider != null && !provider.isEmpty()) {
-                    String providerLower = provider.toLowerCase(Locale.ROOT);
-                    // Allow built-in providers: nodeport, loadbalancer/lb, mcs/multicluster, custom
-                    // Also allow custom providers (fully qualified class names with dots)
-                    boolean isBuiltIn = providerLower.equals("nodeport")
-                                     || providerLower.equals("loadbalancer")
-                                     || providerLower.equals("lb")
-                                     || providerLower.equals("mcs")
-                                     || providerLower.equals("multicluster")
-                                     || providerLower.equals("custom");
-                    boolean isCustomProvider = provider.contains(".");
-
-                    if (!isBuiltIn && !isCustomProvider) {
-                        throw new InvalidConfigurationException(
-                            "Invalid STRIMZI_STRETCH_NETWORK_PROVIDER value: '" + provider + "'. " +
-                            "Valid values: nodeport, loadbalancer (or lb), mcs (or multicluster), custom, or a fully qualified custom provider class name"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /**
      * Validates that both STRIMZI_REMOTE_KUBE_CONFIG and STRIMZI_CENTRAL_CLUSTER_ID
      * are set.
      *
      * @return boolean indicating if valid stretch cluster configuration is set
      */
     public boolean isStretchClusterConfigurationValid() {
-        boolean hasRemoteConfig = getRemoteClusters() != null && !getRemoteClusters().isEmpty();
-        boolean hasCentralId = getCentralClusterId() != null;
-
-        return hasRemoteConfig && hasCentralId;
+        return stretchConfig != null && stretchConfig.isValid();
     }
 
     /**
@@ -435,7 +364,7 @@ public class ClusterOperatorConfig {
 
     public static ClusterOperatorConfig buildFromMap(Map<String, String> map) {
         warningsForRemovedEndVars(map);
-        validateStretchClusterConfiguration(map);
+        StretchClusterConfig.validateConfiguration(map);  // Validate stretch config
         KafkaVersion.Lookup lookup = parseKafkaVersions(map.get(STRIMZI_KAFKA_IMAGES), map.get(STRIMZI_KAFKA_CONNECT_IMAGES), map.get(STRIMZI_KAFKA_MIRROR_MAKER_2_IMAGES));
         return buildFromMap(map, lookup);
 
@@ -478,90 +407,14 @@ public class ClusterOperatorConfig {
         this.versions = lookup;
         this.map = map;
 
-        this.remoteClusters = parseRemoteClusterConfigsFromEnv();
-    }
-
-    /**
-     * Parses the STRIMZI_REMOTE_KUBE_CONFIG environment variable into a map of cluster ID to ClusterInfo.
-     *
-     * The environment variable is expected to follow the format:
-     * <pre>
-     * cluster-id-1.url=https://&lt;cluster1-url&gt;
-     * cluster-id-1.secret=&lt;secret-name-1&gt;
-     * cluster-id-2.url=https://&lt;cluster2-url&gt;
-     * cluster-id-2.secret=&lt;secret-name-2&gt;
-     * </pre>
-     *
-     * @param envValue Environment variable value containing remote cluster configuration
-     * @return Map of cluster IDs to corresponding ClusterInfo objects
-     */
-    public static Map<String, ClusterInfo> parseRemoteClusterConfigs(String envValue) {
-        Map<String, ClusterInfo> clusters = new HashMap<>();
-
-        if (envValue != null && !envValue.isBlank()) {
-            String[] lines = envValue.split("\n");
-
-            for (String line : lines) {
-                long equalsCount = line.chars().filter(ch -> ch == '=').count();
-                if (equalsCount != 1) {
-                    throw new InvalidConfigurationException("Invalid remote cluster configuration line (must contain exactly one '='): " + line);
-                }
-
-                String[] keyValue = line.split("=", 2);
-                String fullKey = keyValue[0].trim();
-                String value = keyValue[1].trim();
-
-                int dotIndex = fullKey.indexOf('.');
-                if (dotIndex == -1) {
-                    throw new InvalidConfigurationException("Invalid remote cluster configuration key (must be in 'clusterId.field' format): " + fullKey);
-                }
-
-                String clusterId = fullKey.substring(0, dotIndex);
-                String field = fullKey.substring(dotIndex + 1);
-
-                if (clusterId.contains(".")) {
-                    throw new InvalidConfigurationException("Cluster ID cannot contain '.' character: " + clusterId);
-                }
-
-                ClusterInfo knownCluster = clusters.get(clusterId);
-                String url = knownCluster != null ? knownCluster.apiUrl() : null;
-                String secret = knownCluster != null ? knownCluster.secretName() : null;
-
-                switch (field) {
-                    case "url":
-                        if (url != null) {
-                            throw new InvalidConfigurationException("Duplicate URL entry for remote cluster '" + clusterId + "'");
-                        }
-                        try {
-                            new URL(value); // Validate URL syntax
-                            url = value;
-                        } catch (MalformedURLException e) {
-                            throw new InvalidConfigurationException("Invalid URL for cluster '" + clusterId + "': " + value);
-                        }
-                        break;
-                    case "secret":
-                        if (secret != null) {
-                            throw new InvalidConfigurationException("Duplicate secret entry for remote cluster '" + clusterId + "'");
-                        }
-                        secret = value;
-                        break;
-                    default:
-                        throw new InvalidConfigurationException("Unknown field '" + field + "' in configuration key: " + fullKey);
-                }
-
-                clusters.put(clusterId, new ClusterInfo(clusterId, url, secret));
-            }
-
-            // Final check: all cluster entries must have both url and secret
-            for (ClusterInfo info : clusters.values()) {
-                if (info.apiUrl() == null || info.secretName() == null) {
-                    throw new InvalidConfigurationException("Incomplete configuration for remote cluster '" + info.clusterId() +
-                            "'. Both 'url' and 'secret' must be specified.");
-                }
+        // Initialize stretch cluster configuration
+        Map<String, String> envMap = new HashMap<>();
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (entry.getValue() instanceof String) {
+                envMap.put(entry.getKey(), (String) entry.getValue());
             }
         }
-
-        return clusters;
+        this.stretchConfig = StretchClusterConfig.fromEnvironment(envMap);
     }
 
     /**
@@ -835,7 +688,7 @@ public class ClusterOperatorConfig {
      * @return  Returns the central cluster id for stretch clusters
      */
     public String getCentralClusterId() {
-        return get(CENTRAL_CLUSTER_ID);
+        return stretchConfig != null ? stretchConfig.getCentralClusterId() : null;
     }
 
     /**
@@ -846,42 +699,35 @@ public class ClusterOperatorConfig {
      * @return true if both central cluster ID and remote kube config are set
      */
     public boolean isStretchClusterConfigured() {
-        String centralId = getCentralClusterId();
-        String remoteConfig = get(REMOTE_KUBE_CONFIG);
-
-        LOGGER.debug("Checking stretch cluster configuration: centralId='{}', remoteConfig present={}",
-                    centralId, remoteConfig != null && !remoteConfig.isEmpty());
-
-        return centralId != null && !centralId.isEmpty() &&
-               remoteConfig != null && !remoteConfig.isEmpty();
+        return stretchConfig != null && stretchConfig.isValid();
     }
 
     /**
      * @return  Returns the stretch network provider name
      */
     public String getStretchNetworkProvider() {
-        return get(STRETCH_NETWORK_PROVIDER);
+        return stretchConfig != null ? stretchConfig.getNetworkProvider() : null;
     }
 
     /**
      * @return  Returns the stretch network config map name
      */
     public String getStretchNetworkConfigMap() {
-        return get(STRETCH_NETWORK_CONFIG_MAP);
+        return stretchConfig != null ? stretchConfig.getNetworkConfigMap() : null;
     }
 
     /**
      * @return  Returns the custom plugin class name
      */
     public String getStretchPluginClassName() {
-        return get(STRETCH_PLUGIN_CLASS_NAME);
+        return stretchConfig != null ? stretchConfig.getPluginClassName() : null;
     }
 
     /**
      * @return  Returns the custom plugin class path
      */
     public String getStretchPluginClassPath() {
-        return get(STRETCH_PLUGIN_CLASS_PATH);
+        return stretchConfig != null ? stretchConfig.getPluginClassPath() : null;
     }
 
     @Override
