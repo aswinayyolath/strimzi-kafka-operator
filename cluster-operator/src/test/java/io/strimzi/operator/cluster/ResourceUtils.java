@@ -417,6 +417,7 @@ public class ResourceUtils {
                 mock(StrimziPodSetOperator.class),
                 mock(StorageClassOperator.class),
                 mock(NodeOperator.class),
+                null,  // ServiceExportOperator
                 kafkaAgentClientProvider(),
                 metricsProvider(),
                 adminClientProvider(),

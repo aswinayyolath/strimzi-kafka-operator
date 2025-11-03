@@ -13,6 +13,7 @@ import io.strimzi.api.kafka.model.kafka.KafkaAuthorization;
 import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationKeycloakBuilder;
 import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationOpaBuilder;
 import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationSimpleBuilder;
+import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.PersistentClaimStorageBuilder;
 import io.strimzi.api.kafka.model.kafka.SingleVolumeStorage;
 import io.strimzi.api.kafka.model.kafka.Storage;
@@ -54,7 +55,10 @@ import static org.hamcrest.Matchers.equalTo;
 
 @ParallelSuite
 public class KafkaBrokerConfigurationBuilderTest {
-    private final static NodeRef NODE_REF = new NodeRef("my-cluster-kafka-2", 2, "kafka", false, true);
+    private final static String CLUSTER = "my-cluster";
+    private final static int NODE_ID = 2;
+    private final static String POOL = "kafka";
+    private final static NodeRef NODE_REF = new NodeRef(KafkaResources.kafkaPodName(CLUSTER, NODE_ID), NODE_ID, POOL, null, false, true);
 
     private final static KafkaVersion KAFKA_VERSION = new KafkaVersion(KafkaVersionTestUtils.LATEST_KAFKA_VERSION, "", false, false, "");
 
@@ -66,7 +70,7 @@ public class KafkaBrokerConfigurationBuilderTest {
         assertThat(configuration, not(containsString("broker.id")));
         assertThat(configuration, containsString("node.id=2"));
 
-        NodeRef controller = new NodeRef("my-cluster-kafka-3", 3, "kafka", true, false);
+        NodeRef controller = new NodeRef("my-cluster-kafka-3", 3, "kafka", null, true, false);
         configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, controller)
                 .build();
         // controllers don't have broker.id at all, only node.id
@@ -77,9 +81,9 @@ public class KafkaBrokerConfigurationBuilderTest {
     @ParallelTest
     public void testKraftMixedNodes()  {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-kafka-0", 0, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-1", 1, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-2", 2, "kafka", true, true)
+                new NodeRef("my-cluster-kafka-0", 0, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-1", 1, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-2", 2, "kafka", null, true, true)
         );
 
         NodeRef nodeRef = nodes.stream().filter(nr -> nr.nodeId() == 2).findFirst().get();
@@ -96,12 +100,12 @@ public class KafkaBrokerConfigurationBuilderTest {
     @ParallelTest
     public void testKraftControllerAndBrokerNodes()  {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-controllers-0", 0, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-1", 1, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-2", 2, "controllers", true, false),
-                new NodeRef("my-cluster-brokers-10", 10, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-11", 11, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-12", 12, "brokers", false, true)
+                new NodeRef("my-cluster-controllers-0", 0, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-1", 1, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-2", 2, "controllers", null, true, false),
+                new NodeRef("my-cluster-brokers-10", 10, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-11", 11, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-12", 12, "brokers", null, false, true)
         );
 
         // Controller-only node
@@ -231,7 +235,7 @@ public class KafkaBrokerConfigurationBuilderTest {
 
     @ParallelTest
     public void testRackIdInKRaftMixedNode()  {
-        String configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-kafka-1", 1, "kafka", true, true))
+        String configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-kafka-1", 1, "kafka", null, true, true))
                 .withRackId(new Rack("failure-domain.kubernetes.io/zone"))
                 .build();
 
@@ -241,7 +245,7 @@ public class KafkaBrokerConfigurationBuilderTest {
 
     @ParallelTest
     public void testRackIdInKRaftControllers()  {
-        String configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-controllers-1", 1, "controllers", true, false))
+        String configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-controllers-1", 1, "controllers", null, true, false))
                 .withRackId(new Rack("failure-domain.kubernetes.io/zone"))
                 .build();
 
@@ -575,7 +579,7 @@ public class KafkaBrokerConfigurationBuilderTest {
                 "config.providers.env.class=org.apache.kafka.common.config.provider.EnvVarConfigProvider"));
 
         // Controller
-        configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-kafka-3", 3, "kafka", true, false))
+        configuration = new KafkaBrokerConfigurationBuilder(Reconciliation.DUMMY_RECONCILIATION, new NodeRef("my-cluster-kafka-3", 3, "kafka", null, true, false))
                 .withUserConfiguration(kafkaConfiguration, false, false)
                 .build();
 
@@ -890,9 +894,9 @@ public class KafkaBrokerConfigurationBuilderTest {
     @ParallelTest
     public void testKraftListenersMixedNodes()  {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-kafka-0", 0, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-1", 1, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-2", 2, "kafka", true, true)
+                new NodeRef("my-cluster-kafka-0", 0, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-1", 1, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-2", 2, "kafka", null, true, true)
         );
 
         GenericKafkaListener listener = new GenericKafkaListenerBuilder()
@@ -938,12 +942,12 @@ public class KafkaBrokerConfigurationBuilderTest {
     @ParallelTest
     public void testKraftListenersBrokerAndControllerNodes()  {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-controllers-0", 0, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-1", 1, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-2", 2, "controllers", true, false),
-                new NodeRef("my-cluster-brokers-10", 10, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-11", 11, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-12", 12, "brokers", false, true)
+                new NodeRef("my-cluster-controllers-0", 0, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-1", 1, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-2", 2, "controllers", null, true, false),
+                new NodeRef("my-cluster-brokers-10", 10, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-11", 11, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-12", 12, "brokers", null, false, true)
         );
 
         GenericKafkaListener listener = new GenericKafkaListenerBuilder()
@@ -1013,15 +1017,15 @@ public class KafkaBrokerConfigurationBuilderTest {
     @ParallelTest
     public void testKraftOauthBrokerControllerAndMixedNodes()  {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-controllers-0", 0, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-1", 1, "controllers", true, false),
-                new NodeRef("my-cluster-controllers-2", 2, "controllers", true, false),
-                new NodeRef("my-cluster-brokers-10", 10, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-11", 11, "brokers", false, true),
-                new NodeRef("my-cluster-brokers-12", 12, "brokers", false, true),
-                new NodeRef("my-cluster-kafka-13", 13, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-14", 14, "kafka", true, true),
-                new NodeRef("my-cluster-kafka-15", 15, "kafka", true, true)
+                new NodeRef("my-cluster-controllers-0", 0, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-1", 1, "controllers", null, true, false),
+                new NodeRef("my-cluster-controllers-2", 2, "controllers", null, true, false),
+                new NodeRef("my-cluster-brokers-10", 10, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-11", 11, "brokers", null, false, true),
+                new NodeRef("my-cluster-brokers-12", 12, "brokers", null, false, true),
+                new NodeRef("my-cluster-kafka-13", 13, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-14", 14, "kafka", null, true, true),
+                new NodeRef("my-cluster-kafka-15", 15, "kafka", null, true, true)
         );
 
         GenericKafkaListener listener = new GenericKafkaListenerBuilder()
@@ -2434,8 +2438,8 @@ public class KafkaBrokerConfigurationBuilderTest {
 
     @ParallelTest
     public void testSimpleAuthorizationOnMigration() {
-        NodeRef broker = new NodeRef("my-cluster-brokers-0", 0, "brokers", false, true);
-        NodeRef controller = new NodeRef("my-cluster-controllers-1", 1, "controllers", true, false);
+        NodeRef broker = new NodeRef("my-cluster-brokers-0", 0, "brokers", null, false, true);
+        NodeRef controller = new NodeRef("my-cluster-controllers-1", 1, "controllers", null, true, false);
 
         KafkaAuthorization auth = new KafkaAuthorizationSimpleBuilder()
                 .build();

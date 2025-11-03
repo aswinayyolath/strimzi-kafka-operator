@@ -12,6 +12,7 @@ import io.strimzi.api.kafka.model.common.template.ContainerEnvVarBuilder;
 import io.strimzi.api.kafka.model.kafka.JbodStorageBuilder;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaBuilder;
+import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.PersistentClaimStorageBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListenerBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.KafkaListenerType;
@@ -112,16 +113,16 @@ public class KafkaPoolTest {
 
         Set<NodeRef> nodes = kp.nodes();
         assertThat(nodes.size(), is(3));
-        assertThat(nodes, hasItems(new NodeRef(CLUSTER_NAME + "-pool-10", 10, "pool", false, true),
-                new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", false, true),
-                new NodeRef(CLUSTER_NAME + "-pool-13", 13, "pool", false, true)));
+        assertThat(nodes, hasItems(new NodeRef(KafkaResources.kafkaPodName(CLUSTER_NAME, 10), 10, "pool", "my-cluster-id", false, true),
+                new NodeRef(KafkaResources.kafkaPodName(CLUSTER_NAME, 11), 11, "pool", "my-cluster-id", false, true),
+                new NodeRef(KafkaResources.kafkaPodName(CLUSTER_NAME, 13), 13, "pool", "my-cluster-id", false, true)));
 
         assertThat(kp.containsNodeId(10), is(true));
         assertThat(kp.containsNodeId(11), is(true));
         assertThat(kp.containsNodeId(12), is(false));
         assertThat(kp.containsNodeId(13), is(true));
 
-        assertThat(kp.nodeRef(11), is(new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", false, true)));
+        assertThat(kp.nodeRef(11), is(new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", null, false, true)));
 
         KafkaNodePoolStatus status = kp.generateNodePoolStatus("my-cluster-id");
         assertThat(status.getClusterId(), is("my-cluster-id"));
@@ -159,9 +160,9 @@ public class KafkaPoolTest {
 
         Set<NodeRef> nodes = kp.nodes();
         assertThat(nodes.size(), is(3));
-        assertThat(nodes, hasItems(new NodeRef(CLUSTER_NAME + "-pool-10", 10, "pool", true, false),
-                new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", true, false),
-                new NodeRef(CLUSTER_NAME + "-pool-13", 13, "pool", true, false)));
+        assertThat(nodes, hasItems(new NodeRef(CLUSTER_NAME + "-pool-10", 10, "pool", null, true, false),
+                new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", null, true, false),
+                new NodeRef(CLUSTER_NAME + "-pool-13", 13, "pool", null, true, false)));
     }
 
     @Test
@@ -190,9 +191,9 @@ public class KafkaPoolTest {
 
         Set<NodeRef> nodes = kp.nodes();
         assertThat(nodes.size(), is(3));
-        assertThat(nodes, hasItems(new NodeRef(CLUSTER_NAME + "-pool-10", 10, "pool", true, true),
-                new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", true, true),
-                new NodeRef(CLUSTER_NAME + "-pool-13", 13, "pool", true, true)));
+        assertThat(nodes, hasItems(new NodeRef(CLUSTER_NAME + "-pool-10", 10, "pool", null, true, true),
+                new NodeRef(CLUSTER_NAME + "-pool-11", 11, "pool", null, true, true),
+                new NodeRef(CLUSTER_NAME + "-pool-13", 13, "pool", null, true, true)));
     }
 
     @Test

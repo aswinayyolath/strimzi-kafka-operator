@@ -11,6 +11,7 @@ import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.strimzi.api.kafka.model.kafka.EphemeralStorageBuilder;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaBuilder;
+import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.Storage;
 import io.strimzi.api.kafka.model.kafka.cruisecontrol.CruiseControlSpec;
 import io.strimzi.api.kafka.model.kafka.cruisecontrol.CruiseControlSpecBuilder;
@@ -79,7 +80,7 @@ public class HashLoginServiceApiCredentialsTest {
             .endHashLoginServiceApiUsers()
             .build();
 
-    private final static Set<NodeRef> NODES = Set.of(new NodeRef("foo-kafka-0", 0, "kafka", false, true));
+    private final static Set<NodeRef> NODES = Set.of(new NodeRef(KafkaResources.kafkaPodName(CLUSTER, 0), 0, "kafka", null, false, true));
     private final static Map<String, Storage> STORAGE = Map.of("kafka", new EphemeralStorageBuilder().withSizeLimit(("10Gi")).build());
 
     private static Kafka createKafka(CruiseControlSpec ccSpec) {

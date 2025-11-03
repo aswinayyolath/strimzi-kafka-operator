@@ -234,15 +234,15 @@ public class KafkaRollerTest {
     public Set<NodeRef> addPodNames(int brokerReplicas, int combinedReplicas, int controllerReplicas) {
         Set<NodeRef> podNames = new LinkedHashSet<>(brokerReplicas);
         for (int brokerId = 0; brokerId < brokerReplicas; brokerId++) {
-            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), brokerId), brokerId, "broker", false, true));
+            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), brokerId), brokerId, "broker", null, false, true));
         }
         int maxCombinedId = brokerReplicas + combinedReplicas;
         for (int controllerId = brokerReplicas; controllerId < maxCombinedId; controllerId++) {
-            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), controllerId), controllerId, "combined", true, true));
+            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), controllerId), controllerId, "combined", null, true, true));
         }
         int maxControllerId = maxCombinedId + controllerReplicas;
         for (int controllerId = maxCombinedId; controllerId < maxControllerId; controllerId++) {
-            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), controllerId), controllerId, "controller", true, false));
+            podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), controllerId), controllerId, "controller", null, true, false));
         }
         return podNames;
     }
@@ -250,11 +250,11 @@ public class KafkaRollerTest {
     public Set<NodeRef> addDisconnectedPodNames(int replicas) {
         Set<NodeRef> podNames = new LinkedHashSet<>(replicas);
 
-        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 10), 10, null, true, true));
-        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 200), 200, null, true, true));
-        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 30), 30, null, true, true));
-        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 400), 400, null, true, true));
-        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 500), 500, null, true, true));
+        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 10), 10, null, null, true, true));
+        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 200), 200, null, null, true, true));
+        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 30), 30, null, null, true, true));
+        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 400), 400, null, null, true, true));
+        podNames.add(new NodeRef(KafkaResources.kafkaPodName(clusterName(), 500), 500, null, null, true, true));
         return podNames;
     }
 

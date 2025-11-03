@@ -196,9 +196,36 @@ public class StretchClusterConfig {
                 String clusterId = fullKey.substring(0, dotIndex);
                 String field = fullKey.substring(dotIndex + 1);
 
+                // Check for additional dots in cluster ID (not allowed)
+                if (clusterId.contains(".")) {
+                    throw new InvalidConfigurationException(
+                        "Invalid cluster ID '" + clusterId + "'. " +
+                        "Cluster IDs cannot contain dots"
+                    );
+                }
+
                 if ("url".equals(field)) {
+                    // Check for duplicate key
+                    if (urls.containsKey(clusterId)) {
+                        throw new InvalidConfigurationException(
+                            "Duplicate configuration for cluster '" + clusterId + ".url'"
+                        );
+                    }
+                    // Validate URL format
+                    if (!value.startsWith("http://") && !value.startsWith("https://")) {
+                        throw new InvalidConfigurationException(
+                            "Invalid URL format for cluster '" + clusterId + "': '" + value + "'. " +
+                            "URL must start with 'http://' or 'https://'"
+                        );
+                    }
                     urls.put(clusterId, value);
                 } else if ("secret".equals(field)) {
+                    // Check for duplicate key
+                    if (secrets.containsKey(clusterId)) {
+                        throw new InvalidConfigurationException(
+                            "Duplicate configuration for cluster '" + clusterId + ".secret'"
+                        );
+                    }
                     secrets.put(clusterId, value);
                 } else {
                     throw new InvalidConfigurationException(

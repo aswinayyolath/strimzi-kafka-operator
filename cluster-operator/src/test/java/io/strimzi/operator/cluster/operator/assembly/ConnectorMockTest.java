@@ -187,13 +187,16 @@ public class ConnectorMockTest {
 
         PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION);
         metricsProvider = ResourceUtils.metricsProvider();
-        ResourceOperatorSupplier ros = new ResourceOperatorSupplier(vertx, client,
+        ResourceOperatorSupplier ros = new ResourceOperatorSupplier(vertx,
+                client,
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
-                metricsProvider,
-                pfa);
+                ResourceUtils.metricsProvider(),
+                pfa,
+                Map.of(),
+                null);
 
-        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, ros.kafkaOperator, ros.connectOperator, ros.mirrorMaker2Operator, ros.strimziPodSetOperator, ros.podOperations, ros.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
+        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, ros.kafkaOperator, ros.connectOperator, ros.mirrorMaker2Operator, ros.strimziPodSetOperator, ros.podOperations, ros.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()), false, null);
         podSetController.start();
 
         setupMockConnectAPI();

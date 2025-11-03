@@ -66,9 +66,9 @@ public class KafkaClusterOAuthValidationTest {
             .endSpec()
             .build();
     private final static Set<NodeRef> THREE_NODES = Set.of(
-            new NodeRef("my-cluster-mixed-0", 0, "mixed", true, true),
-            new NodeRef("my-cluster-mixed-1", 1, "mixed", true, true),
-            new NodeRef("my-cluster-mixed-2", 2, "mixed", true, true));
+            new NodeRef("my-cluster-mixed-0", 0, "mixed", null, true, true),
+            new NodeRef("my-cluster-mixed-1", 1, "mixed", null, true, true),
+            new NodeRef("my-cluster-mixed-2", 2, "mixed", null, true, true));
 
     private static List<GenericKafkaListener> getListeners(KafkaListenerAuthenticationOAuth auth)   {
         GenericKafkaListener listener1 = new GenericKafkaListenerBuilder()
@@ -138,7 +138,7 @@ public class KafkaClusterOAuthValidationTest {
                 .build();
 
         List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, List.of(MIXED), Map.of(), KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, SHARED_ENV_PROVIDER);
-        KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, null, SHARED_ENV_PROVIDER);
+        KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, null, KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, null, SHARED_ENV_PROVIDER);
     }
 
     @ParallelTest
@@ -170,7 +170,7 @@ public class KafkaClusterOAuthValidationTest {
                     .build();
 
             List<KafkaPool> pools = NodePoolUtils.createKafkaPools(Reconciliation.DUMMY_RECONCILIATION, kafka, List.of(MIXED), Map.of(), KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, SHARED_ENV_PROVIDER);
-            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, null, SHARED_ENV_PROVIDER);
+            KafkaCluster.fromCrd(Reconciliation.DUMMY_RECONCILIATION, kafka, pools, VERSIONS, null, KafkaVersionTestUtils.DEFAULT_KRAFT_VERSION_CHANGE, null, SHARED_ENV_PROVIDER);
         });
     }
 

@@ -32,9 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ParallelSuite
 public class ListenersUtilsTest {
-    private final static NodeRef NODE_0 = new NodeRef("my-cluster-kafka-0", 0, "kafka", false, true);
-    private final static NodeRef NODE_1 = new NodeRef("my-cluster-kafka-1", 1, "kafka", false, true);
-    private final static NodeRef NODE_2 = new NodeRef("my-cluster-kafka-2", 2, "kafka", false, true);
+    private final static NodeRef NODE_0 = new NodeRef("my-cluster-kafka-0", 0, "kafka", null, true, true);
+    private final static NodeRef NODE_1 = new NodeRef("my-cluster-kafka-1", 1, "kafka", null, false, true);
+    private final static NodeRef NODE_2 = new NodeRef("my-cluster-kafka-2", 2, "kafka", null, false, true);
 
     private final GenericKafkaListener oldPlain = new GenericKafkaListenerBuilder()
             .withName("plain")

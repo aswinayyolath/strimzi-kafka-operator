@@ -23,8 +23,6 @@ public class DnsNameGenerator {
     private static final String KUBERNETES_SERVICE_DNS_DOMAIN =
             System.getenv().getOrDefault("KUBERNETES_SERVICE_DNS_DOMAIN", "cluster.local");
 
-    private static final String MCS_SERVICE_DNS_DOMAIN = "clusterset.local";
-
     private DnsNameGenerator(String namespace, String serviceName) {
         this.namespace = namespace;
         this.serviceName = serviceName;
@@ -216,8 +214,8 @@ public class DnsNameGenerator {
      * Generates the DNS name of the service including the cluster suffix
      * (i.e. usually with the cluster.local - but can be different on different clusters)
      * Example: my-service.my-ns.svc.cluster.local
-     * if cluster Id exists, the function returns the MCS address for a service
-     * Example: cluster-id.my-service.my-ns.svc.clusterset.local
+     * If stretch provider is configured, delegates DNS generation to the provider
+     * (e.g., MCS plugin returns provider-specific DNS format)
      *
      * @return              DNS name of the service
      */
@@ -230,23 +228,6 @@ public class DnsNameGenerator {
                 namespace,
                 KUBERNETES_SERVICE_DNS_DOMAIN);
     }
-
-    /**
-     * Generates the MCS address for a stretch cluster configuration
-     *
-     * @return              DNS name of the service
-     */
-    public String stretchServiceDnsName() {
-        if (stretchProvider != null) {
-            return stretchProvider.generateServiceDnsName(namespace, serviceName, clusterId);
-        }
-        return String.format("%s.%s.%s.svc.%s",
-                    clusterId,
-                    serviceName,
-                    namespace,
-                    MCS_SERVICE_DNS_DOMAIN);
-    }
-
 
     /**
      * Generates the wildcard DNS name of the service without the cluster domain suffix

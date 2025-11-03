@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 public class KafkaBrokerConfigurationDiffTest {
     KafkaVersion kafkaVersion = KafkaVersionTestUtils.getKafkaVersionLookup().defaultVersion();
-    private final NodeRef nodeRef = new NodeRef("broker-0", 0, "broker", false, true);
+    private final NodeRef nodeRef = new NodeRef("broker-0", 0, "broker", null, false, true);
 
     private ConfigEntry instantiateConfigEntry(String name, String val) {
         // use reflection to instantiate ConfigEntry
@@ -164,7 +164,7 @@ public class KafkaBrokerConfigurationDiffTest {
 
     @Test
     public void testChangedKRaftControllerConfigForCombinedNode() {
-        NodeRef combinedNodeId = new NodeRef("broker-0", 0, "broker", true, true);
+        NodeRef combinedNodeId = new NodeRef("broker-0", 0, "broker", null, true, true);
         List<ConfigEntry> desiredControllerConfig = singletonList(new ConfigEntry("controller.quorum.election.timeout.ms", "5000"));
         List<ConfigEntry> currentControllerConfig = singletonList(new ConfigEntry("controller.quorum.election.timeout.ms", "1000"));
         KafkaBrokerConfigurationDiff kcd = new KafkaBrokerConfigurationDiff(Reconciliation.DUMMY_RECONCILIATION, getCurrentConfiguration(currentControllerConfig),

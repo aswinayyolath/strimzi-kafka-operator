@@ -63,9 +63,9 @@ public class WorkloadUtilsTest {
     private final static String HEADLESS_SERVICE_NAME = "my-workload-headless";
     private final static int REPLICAS = 5;
     private final static Set<NodeRef> NODES = Set.of(
-            new NodeRef("my-cluster-nodes-10", 10, "nodes", false, true),
-            new NodeRef("my-cluster-nodes-11", 11, "nodes", false, true),
-            new NodeRef("my-cluster-nodes-12", 12, "nodes", false, true)
+            new NodeRef("my-cluster-nodes-10", 10, "nodes", null, false, true),
+            new NodeRef("my-cluster-nodes-11", 11, "nodes", null, false, true),
+            new NodeRef("my-cluster-nodes-12", 12, "nodes", null, false, true)
     );
     private static final OwnerReference OWNER_REFERENCE = new OwnerReferenceBuilder()
             .withApiVersion("v1")
@@ -317,7 +317,9 @@ public class WorkloadUtilsTest {
                                 .withName(n.podName())
                             .endMetadata()
                             .build();
-                }
+                },
+                null,
+                null
         );
 
         assertThat(sps.getMetadata().getName(), is(NAME));
@@ -363,7 +365,9 @@ public class WorkloadUtilsTest {
                             .withName(n.podName())
                             .endMetadata()
                             .build();
-                }
+                },
+                null,
+                null
         );
 
         assertThat(sps.getMetadata().getName(), is(NAME));

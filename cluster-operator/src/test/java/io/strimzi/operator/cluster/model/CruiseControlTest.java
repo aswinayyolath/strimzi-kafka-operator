@@ -137,9 +137,9 @@ public class CruiseControlTest {
             .endSpec()
             .build();
     private static final Set<NodeRef> NODES = Set.of(
-            new NodeRef("my-cluster-brokers-0", 0, "brokers", false, true),
-            new NodeRef("my-cluster-brokers-1", 1, "brokers", false, true),
-            new NodeRef("my-cluster-brokers-2", 2, "brokers", false, true)
+            new NodeRef("my-cluster-brokers-0", 0, "brokers", null, false, true),
+            new NodeRef("my-cluster-brokers-1", 1, "brokers", null, false, true),
+            new NodeRef("my-cluster-brokers-2", 2, "brokers", null, false, true)
     );
     private static final Map<String, Storage> STORAGE = Map.of("brokers", new JbodStorageBuilder().withVolumes(new PersistentClaimStorageBuilder().withId(0).withSize("100Gi").build()).build());
 
@@ -307,12 +307,12 @@ public class CruiseControlTest {
     @ParallelTest
     public void testBrokerCapacitiesWithPools() {
         Set<NodeRef> nodes = Set.of(
-                new NodeRef("my-cluster-pool1-0", 0, "pool1", false, true),
-                new NodeRef("my-cluster-pool1-1", 1, "pool1", false, true),
-                new NodeRef("my-cluster-pool1-2", 2, "pool1", false, true),
-                new NodeRef("my-cluster-pool2-10", 10, "pool2", false, true),
-                new NodeRef("my-cluster-pool2-11", 11, "pool2", false, true),
-                new NodeRef("my-cluster-pool2-12", 12, "pool2", false, true)
+                new NodeRef("my-cluster-pool1-0", 0, "pool1", null, false, true),
+                new NodeRef("my-cluster-pool1-1", 1, "pool1", null, false, true),
+                new NodeRef("my-cluster-pool1-2", 2, "pool1", null, false, true),
+                new NodeRef("my-cluster-pool2-10", 10, "pool2", null, false, true),
+                new NodeRef("my-cluster-pool2-11", 11, "pool2", null, false, true),
+                new NodeRef("my-cluster-pool2-12", 12, "pool2", null, false, true)
         );
 
         Map<String, Storage> storage = new HashMap<>();

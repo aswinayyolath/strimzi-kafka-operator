@@ -36,9 +36,9 @@ public class ClusterCaRenewalTest {
     private static final Set<NodeRef> NODES = new LinkedHashSet<>();
     // LinkedHashSet is used to maintain ordering and have predictable test results
     static {
-        NODES.add(new NodeRef("pod0", 0, null, false, true));
-        NODES.add(new NodeRef("pod1", 1, null, false, true));
-        NODES.add(new NodeRef("pod2", 2, null, false, true));
+        NODES.add(new NodeRef("pod0", 0, null, null, false, true));
+        NODES.add(new NodeRef("pod1", 1, null, null, false, true));
+        NODES.add(new NodeRef("pod2", 2, null, null, false, true));
     }
 
     @ParallelTest
@@ -52,7 +52,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 null,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("new-cert0"));
@@ -88,7 +89,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("new-cert0"));
@@ -124,7 +126,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("new-cert0"));
@@ -160,7 +163,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("old-cert"));
@@ -189,7 +193,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("old-cert"));
@@ -216,7 +221,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                true
+                true,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("old-cert"));
@@ -241,7 +247,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                true
+                true,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("old-cert"));
@@ -267,7 +274,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 SUBJECT_FN,
                 initialCerts,
-                true
+                true,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("old-cert"));
@@ -291,10 +299,11 @@ public class ClusterCaRenewalTest {
 
         Map<String, CertAndKey> newCerts = mockedCa.maybeCopyOrGenerateCerts(
                 Reconciliation.DUMMY_RECONCILIATION,
-                Set.of(new NodeRef("pod1", 1, null, false, true)),
+                Set.of(new NodeRef("pod1", 1, null, null, false, true)),
                 SUBJECT_FN,
                 initialCerts,
-                true
+                true,
+                null
         );
 
         assertThat(newCerts.get("pod0"), is(nullValue()));
@@ -322,7 +331,8 @@ public class ClusterCaRenewalTest {
                 NODES,
                 node -> new Subject.Builder().withCommonName(node.podName()).build(),
                 initialCerts,
-                isMaintenanceTimeWindowsSatisfied
+                isMaintenanceTimeWindowsSatisfied,
+                null
         );
 
         assertThat(new String(newCerts.get("pod0").cert()), is("new-cert0"));
