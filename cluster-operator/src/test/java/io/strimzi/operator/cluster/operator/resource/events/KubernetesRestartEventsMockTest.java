@@ -215,12 +215,10 @@ public class KubernetesRestartEventsMockTest {
                 ResourceUtils.adminClientProvider(),
                 ResourceUtils.kafkaAgentClientProvider(),
                 ResourceUtils.metricsProvider(),
-                PFA,
-                Map.of(),
-                null
+                PFA
         );
 
-        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()), false, null);
+        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         podSetController.start();
 
         // Initial reconciliation to create cluster
@@ -274,7 +272,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx
         );
 
@@ -318,7 +315,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx);
 
         reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(CA_CERT_HAS_OLD_GENERATION, context));
@@ -349,7 +345,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx);
 
         reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(CA_CERT_REMOVED, context));
@@ -380,7 +375,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx);
 
         reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(CA_CERT_RENEWED, context));
@@ -417,7 +411,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplierWithModifiedAdmin,
                 PFA,
-                Map.of(),
                 vertx);
 
         reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(CONFIG_CHANGE_REQUIRES_RESTART, context));
@@ -483,7 +476,6 @@ public class KubernetesRestartEventsMockTest {
                     clusterOperatorConfig,
                     supplierWithModifiedAdmin,
                     PFA,
-                    Map.of(),
                     vertx);
 
             reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(POD_UNRESPONSIVE, context));
@@ -545,7 +537,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx);
         reconciler.reconcile(new KafkaStatus(), Clock.systemUTC()).onComplete(verifyEventPublished(KAFKA_CERTIFICATES_CHANGED, context));
     }
@@ -588,7 +579,6 @@ public class KubernetesRestartEventsMockTest {
                 clusterOperatorConfig,
                 supplier,
                 PFA,
-                Map.of(),
                 vertx);
     }
 
@@ -610,9 +600,8 @@ public class KubernetesRestartEventsMockTest {
                 adminClientProvider,
                 ResourceUtils.kafkaAgentClientProvider(),
                 ResourceUtils.metricsProvider(),
-                PFA,
-                Map.of(),
-                null);
+                PFA
+        );
     }
 
     private Admin withChangedBrokerConf(Admin preMockedAdminClient) {

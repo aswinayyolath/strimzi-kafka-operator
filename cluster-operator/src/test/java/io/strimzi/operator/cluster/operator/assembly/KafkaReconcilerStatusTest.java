@@ -933,7 +933,7 @@ public class KafkaReconcilerStatusTest {
         private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(MockKafkaReconcilerStatusTasks.class.getName());
 
         public MockKafkaReconcilerStatusTasks(Reconciliation reconciliation, ResourceOperatorSupplier supplier, Kafka kafkaCr, List<KafkaNodePool> kafkaNodePools) {
-            super(reconciliation, kafkaCr, null, createKafkaCluster(reconciliation, supplier, kafkaCr, kafkaNodePools), CLUSTER_CA, CLIENTS_CA, CO_CONFIG, supplier, PFA, Map.of(), vertx);
+            super(reconciliation, kafkaCr, null, createKafkaCluster(reconciliation, supplier, kafkaCr, kafkaNodePools), CLUSTER_CA, CLIENTS_CA, CO_CONFIG, supplier, PFA, vertx);
         }
 
         private static KafkaCluster createKafkaCluster(Reconciliation reconciliation, ResourceOperatorSupplier supplier, Kafka kafkaCr, List<KafkaNodePool> kafkaNodePools)   {
@@ -981,7 +981,7 @@ public class KafkaReconcilerStatusTest {
         private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(MockKafkaReconcilerStatusTasks.class.getName());
 
         public MockKafkaReconcilerFailsWithVersionUpdate(Reconciliation reconciliation, ResourceOperatorSupplier supplier, Kafka kafkaCr, List<KafkaNodePool> kafkaNodePools) {
-            super(reconciliation, kafkaCr, kafkaNodePools, createKafkaCluster(reconciliation, supplier, kafkaCr, kafkaNodePools), CLUSTER_CA, CLIENTS_CA, CO_CONFIG, supplier, PFA, Map.of(), vertx);
+            super(reconciliation, kafkaCr, kafkaNodePools, createKafkaCluster(reconciliation, supplier, kafkaCr, kafkaNodePools), CLUSTER_CA, CLIENTS_CA, CO_CONFIG, supplier, PFA, vertx);
         }
 
         private static KafkaCluster createKafkaCluster(Reconciliation reconciliation, ResourceOperatorSupplier supplier, Kafka kafkaCr, List<KafkaNodePool> kafkaNodePools)   {

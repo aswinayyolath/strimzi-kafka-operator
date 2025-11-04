@@ -302,7 +302,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                         kafka,
                                         pools,
                                         versions,
-                                        null,  // stretchNetworkingProvider - set later
                                         versionChange,
                                         clusterId,
                                         sharedEnvironmentProvider
@@ -324,7 +323,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @param kafka                         Kafka custom resource
      * @param pools                         Set of node pools used by this cluster
      * @param versions                      Supported Kafka versions
-     * @param stretchNetworkingProvider     Stretch networking provider (can be null for non-stretch clusters)
      * @param versionChange                 KafkaVersionChange instance describing how the Kafka versions (and the
      *                                      various protocol and metadata versions) to be used in this reconciliation
      * @param clusterId                     Kafka cluster Id (or null if it is not known yet)
@@ -336,7 +334,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                        Kafka kafka,
                                        List<KafkaPool> pools,
                                        KafkaVersion.Lookup versions,
-                                       StretchNetworkingProvider stretchNetworkingProvider,
                                        KafkaVersionChange versionChange,
                                        String clusterId,
                                        SharedEnvironmentProvider sharedEnvironmentProvider
@@ -1052,6 +1049,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
     /**
      * Generates a list of bootstrap route which can be used to bootstrap clients outside of OpenShift.
+     *
+     * @return The list of generated Routes
+     */
+    public List<Route> generateExternalBootstrapRoutes() {
+        return generateExternalBootstrapRoutes(false);
+    }
+    /**
+     * Generates a list of bootstrap route which can be used to bootstrap clients outside of OpenShift.
      * @param isRemoteResource  Indicates if this Route is to be deployed in a remote cluster
      *
      * @return The list of generated Routes
@@ -1115,6 +1120,15 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return result;
+    }
+
+    /**
+     * Generates list of per-pod routes. These routes are used for exposing it externally using OpenShift Routes.
+     *
+     * @return The list with generated Routes
+     */
+    public List<Route> generateExternalRoutes() {
+        return generateExternalRoutes(null);
     }
 
     /**
@@ -1265,6 +1279,15 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return result;
+    }
+
+    /**
+     * Generates list of per-pod ingress. This ingress is used for exposing it externally using Nginx Ingress.
+     *
+     * @return The list of generated Ingresses
+     */
+    public List<Ingress> generateExternalIngresses() {
+        return generateExternalIngresses(null);
     }
 
     /**
@@ -1445,6 +1468,25 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return podSets;
+    }
+
+    /**
+     * Generates the StrimziPodSet for the Kafka cluster.
+     *
+     * @param isOpenShift            Flags whether we are on OpenShift or not
+     * @param imagePullPolicy        Image pull policy which will be used by the pods
+     * @param imagePullSecrets       List of image pull secrets
+     * @param podAnnotationsProvider Function which provides annotations for given pod based on its broker ID. The
+     *                               annotations for each pod are different due to the individual configurations.
+     *                               So they need to be dynamically generated though this function instead of just
+     *                               passed as Map.
+     * @return List of generated StrimziPodSets with Kafka pods
+     */
+    public List<StrimziPodSet> generatePodSets(boolean isOpenShift,
+                                                ImagePullPolicy imagePullPolicy,
+                                                List<LocalObjectReference> imagePullSecrets,
+                                                Function<NodeRef, Map<String, String>> podAnnotationsProvider) {
+        return generatePodSets(isOpenShift, imagePullPolicy, imagePullSecrets, podAnnotationsProvider, null, null);
     }
 
     /**
@@ -2174,6 +2216,19 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 .trim();
     }
 
+    /**
+     * Generates a list of configuration ConfigMaps - one for each broker in the cluster. The ConfigMaps contain the
+     * configurations which should be used by given broker. This is used with StrimziPodSets.
+     *
+     * @param metricsAndLogging   Object with logging and metrics configuration collected from external user-provided config maps
+     * @param advertisedHostnames Map with advertised hostnames for different brokers and listeners
+     * @param advertisedPorts     Map with advertised ports for different brokers and listeners
+     *
+     * @return ConfigMap with the shared configuration.
+     */
+    public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(MetricsAndLogging metricsAndLogging, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
+        return generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts, null);
+    }
     /**
      * Generates a list of configuration ConfigMaps - one for each broker in the cluster. The ConfigMaps contain the
      * configurations which should be used by given broker. This is used with StrimziPodSets.

@@ -182,16 +182,10 @@ public class KafkaUpgradeDowngradeWithKRaftMockTest {
         Admin mockAdmin = ResourceUtils.adminClient();
         metadataLevel = new AtomicInteger(metadataVersionToLevel(initialMetadataVersion));
         mockAdminClient(mockAdmin);
-        supplier = new ResourceOperatorSupplier(vertx,
-                client,
-                ResourceUtils.adminClientProvider(),
-                ResourceUtils.kafkaAgentClientProvider(),
-                ResourceUtils.metricsProvider(),
-                PFA,
-                Map.of(),
-                null);
+        supplier =  new ResourceOperatorSupplier(vertx, client, ResourceUtils.adminClientProvider(mockAdmin),
+                ResourceUtils.kafkaAgentClientProvider(), ResourceUtils.metricsProvider(), PFA);
 
-        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()), false, null);
+        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         podSetController.start();
 
         ClusterOperatorConfig config = new ClusterOperatorConfig.ClusterOperatorConfigBuilder(ResourceUtils.dummyClusterOperatorConfig(), VERSIONS)

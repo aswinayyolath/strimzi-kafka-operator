@@ -150,15 +150,13 @@ public class KafkaConnectorIT {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
                 metrics,
-                pfa,
-                Map.of(),
-                null
+                pfa
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
                 ClusterOperatorConfig.buildFromMap(Map.of(), KafkaVersionTestUtils.getKafkaVersionLookup()),
-                connect -> new KafkaConnectApiImpl(),
-                connectCluster.getPort(0)
+            connect -> new KafkaConnectApiImpl(),
+            connectCluster.getPort(0)
         ) { };
 
         Checkpoint async = context.checkpoint();
@@ -192,7 +190,7 @@ public class KafkaConnectorIT {
     }
 
     @Test
-    public void testConnectorResourceNotReadyWhenConnectorFailed(VertxTestContext context) {
+    public void     testConnectorResourceNotReadyWhenConnectorFailed(VertxTestContext context) {
         KafkaConnectApiImpl connectClient = new KafkaConnectApiImpl();
 
         PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION);
@@ -218,9 +216,7 @@ public class KafkaConnectorIT {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
                 metrics,
-                pfa,
-                Map.of(),
-                null
+                pfa
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
@@ -232,10 +228,10 @@ public class KafkaConnectorIT {
         operator.reconcileConnectorAndHandleResult(new Reconciliation("test", "KafkaConnect", namespace, "bogus"),
                         "localhost", connectClient, true, connectorName,
                         connector)
-            .onComplete(context.succeeding(v -> {
-                assertConnectorIsNotReady(context, client, namespace, connectorName);
-                context.completeNow();
-            }));
+                .onComplete(context.succeeding(v -> {
+                    assertConnectorIsNotReady(context, client, namespace, connectorName);
+                    context.completeNow();
+                }));
     }
 
     @Test
@@ -265,9 +261,7 @@ public class KafkaConnectorIT {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
                 metrics,
-                pfa,
-                Map.of(),
-                null
+                pfa
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
@@ -323,9 +317,7 @@ public class KafkaConnectorIT {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
             metrics,
-                pfa,
-                Map.of(),
-                null
+                pfa
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,
@@ -370,9 +362,7 @@ public class KafkaConnectorIT {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
             metrics,
-                pfa,
-                Map.of(),
-                null
+                pfa
         );
 
         KafkaConnectAssemblyOperator operator = new KafkaConnectAssemblyOperator(vertx, pfa, ros,

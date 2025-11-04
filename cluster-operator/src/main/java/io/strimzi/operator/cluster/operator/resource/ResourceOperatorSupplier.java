@@ -21,7 +21,6 @@ import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolList;
 import io.strimzi.api.kafka.model.rebalance.KafkaRebalance;
 import io.strimzi.api.kafka.model.rebalance.KafkaRebalanceList;
 import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
-import io.strimzi.operator.cluster.RemoteClientSupplier;
 import io.strimzi.operator.cluster.model.DefaultSharedEnvironmentProvider;
 import io.strimzi.operator.cluster.model.SharedEnvironmentProvider;
 import io.strimzi.operator.cluster.operator.assembly.BrokersInUseCheck;
@@ -44,7 +43,6 @@ import io.strimzi.operator.cluster.operator.resource.kubernetes.RoleOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.RouteOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceAccountOperator;
-import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceExportOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StorageClassOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StrimziPodSetOperator;
@@ -52,18 +50,12 @@ import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.DefaultAdminClientProvider;
 import io.strimzi.operator.common.MetricsProvider;
 import io.vertx.core.Vertx;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
-import java.util.HashMap;
-import java.util.Map;
 
 /**
- * Class holding the various resource operator
+ * Class holding the various resource operator and providers of various clients
  */
 @SuppressWarnings({"checkstyle:ClassDataAbstractionCoupling"})
 public class ResourceOperatorSupplier {
-    private static final Logger LOGGER = LogManager.getLogger(ResourceOperatorSupplier.class);
     /**
      * Secret operator
      */
@@ -201,11 +193,6 @@ public class ResourceOperatorSupplier {
     public final NodeOperator nodeOperator;
 
     /**
-     * ServiceExport operator
-     */
-    public final ServiceExportOperator serviceExportOperator;
-
-    /**
      * Metrics provider
      */
     public final MetricsProvider metricsProvider;
@@ -236,114 +223,22 @@ public class ResourceOperatorSupplier {
     public final BrokersInUseCheck brokersInUseCheck;
 
     /**
-     * Stretch Strimzi podset operators
-     */
-    public final Map<String, StrimziPodSetOperator> stretchStrimziPodsetOperators = new HashMap<>();
-
-    /**
-     * Stretch Service Account Operations
-     */
-    public final Map<String, ServiceAccountOperator> stretchServiceAccountOperations = new HashMap<>();
-
-    /**
-     * Stretch Pod Operators
-     */
-    public final Map<String, PodOperator> stretchPodOperators = new HashMap<>();
-
-    /**
-     * Stretch Secret Operations
-     */
-    public final Map<String, SecretOperator> stretchSecretOperations = new HashMap<>();
-
-    /**
-     * Stretch Service Operations
-     */
-    public final Map<String, ServiceOperator> stretchServiceOperations = new HashMap<>();
-
-    /**
-     * Stretch Route Operations
-     */
-    public final Map<String, RouteOperator> stretchRouteOperations = new HashMap<>();
-
-    /**
-     * Stretch Ingress Operations
-     */
-    public final Map<String, IngressOperator> stretchIngressOperations = new HashMap<>();
-
-
-    /**
-     * Stretch ConfigMap Operations
-     */
-    public final Map<String, ConfigMapOperator> stretchConfigMapOperations = new HashMap<>();
-
-    /**
-     * Stretch ServiceExport operator
-     */
-    public final Map<String, ServiceExportOperator> stretchServiceExportOperators = new HashMap<>();
-
-    /**
-     * Stretch PVC operator
-     */
-    public final Map<String, PvcOperator> stretchPvcOperations = new HashMap<>();
-
-    /**
-     * Stretch Storage Class operator
-     */
-    public final Map<String, StorageClassOperator> stretchStorageClassOperations = new HashMap<>();
-
-    /**
-     * Stretch Cluster Role Binding operator
-     */
-    public final Map<String, ClusterRoleBindingOperator> stretchClusterRoleBindingOperators = new HashMap<>();
-
-    /**
      * Constructor
      *
      * @param vertx                 Vert.x instance
      * @param client                Kubernetes Client
      * @param metricsProvider       Metrics provider
      * @param pfa                   Platform Availability Features
-     * @param remotePfas            Platform Availability Features for remote clusters
      * @param operatorName          Name of this operator instance
-     * @param remoteClientSupplier  class that holds details of all remote Kubernets cluster
      */
-    public ResourceOperatorSupplier(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, Map<String, PlatformFeaturesAvailability> remotePfas, String operatorName, RemoteClientSupplier remoteClientSupplier) {
+    public ResourceOperatorSupplier(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, String operatorName) {
         this(vertx,
                 client,
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
                 metricsProvider,
                 pfa,
-                remotePfas,
-                new KubernetesRestartEventPublisher(client, operatorName),
-                remoteClientSupplier,
-                null  // centralClusterId - will be set later if needed
-        );
-    }
-
-    /**
-     * Constructor with central cluster ID
-     *
-     * @param vertx                 Vert.x instance
-     * @param client                Kubernetes Client
-     * @param metricsProvider       Metrics provider
-     * @param pfa                   Platform Availability Features
-     * @param remotePfas            Platform Availability Features for remote clusters
-     * @param operatorName          Name of this operator instance
-     * @param remoteClientSupplier  class that holds details of all remote Kubernets cluster
-     * @param centralClusterId      ID of the central cluster
-     */
-    public ResourceOperatorSupplier(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, Map<String, PlatformFeaturesAvailability> remotePfas, String operatorName, RemoteClientSupplier remoteClientSupplier, String centralClusterId) {
-        this(vertx,
-                client,
-                new DefaultAdminClientProvider(),
-                new DefaultKafkaAgentClientProvider(),
-                metricsProvider,
-                pfa,
-                remotePfas,
-                new KubernetesRestartEventPublisher(client, operatorName),
-                remoteClientSupplier,
-                centralClusterId
+                new KubernetesRestartEventPublisher(client, operatorName)
         );
     }
 
@@ -356,27 +251,20 @@ public class ResourceOperatorSupplier {
      * @param kafkaAgentClientProvider Kafka Agent client provider
      * @param metricsProvider          Metrics provider
      * @param pfa                      Platform Availability Features
-     * @param remotePfas               Platform Availability Features for remote clusters
-     * @param remoteClientSupplier     Class that holds details of all remote Kubernets cluster
      */
     public ResourceOperatorSupplier(Vertx vertx,
                                     KubernetesClient client,
                                     AdminClientProvider adminClientProvider,
                                     KafkaAgentClientProvider kafkaAgentClientProvider,
                                     MetricsProvider metricsProvider,
-                                    PlatformFeaturesAvailability pfa,
-                                    Map<String, PlatformFeaturesAvailability> remotePfas,
-                                    RemoteClientSupplier remoteClientSupplier) {
+                                    PlatformFeaturesAvailability pfa) {
         this(vertx,
                 client,
                 adminClientProvider,
                 kafkaAgentClientProvider,
                 metricsProvider,
                 pfa,
-                remotePfas,
-                new KubernetesRestartEventPublisher(client, "operatorName"),
-                remoteClientSupplier,
-                null  // centralClusterId
+                new KubernetesRestartEventPublisher(client, "operatorName")
         );
     }
 
@@ -386,13 +274,10 @@ public class ResourceOperatorSupplier {
                                      KafkaAgentClientProvider kafkaAgentClientProvider,
                                      MetricsProvider metricsProvider,
                                      PlatformFeaturesAvailability pfa,
-                                     Map<String, PlatformFeaturesAvailability> remotePfas,
-                                     KubernetesRestartEventPublisher restartEventPublisher,
-                                     RemoteClientSupplier remoteClientSupplier,
-                                     String centralClusterId) {
+                                     KubernetesRestartEventPublisher restartEventPublisher) {
         this(new ServiceOperator(vertx, client),
-                (pfa.hasRoutes() && remotePfas.entrySet().stream().allMatch(x -> x.getValue().hasRoutes())) ? new RouteOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
-                (pfa.hasImages() && remotePfas.entrySet().stream().allMatch(x -> x.getValue().hasImages())) ? new ImageStreamOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
+                pfa.hasRoutes() ? new RouteOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
+                pfa.hasImages() ? new ImageStreamOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
                 new ConfigMapOperator(vertx, client),
                 new SecretOperator(vertx, client),
                 new PvcOperator(vertx, client),
@@ -405,8 +290,8 @@ public class ResourceOperatorSupplier {
                 new PodDisruptionBudgetOperator(vertx, client),
                 new PodOperator(vertx, client),
                 new IngressOperator(vertx, client),
-                (pfa.hasBuilds() && remotePfas.entrySet().stream().allMatch(x -> x.getValue().hasBuilds())) ? new BuildConfigOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
-                (pfa.hasBuilds() && remotePfas.entrySet().stream().allMatch(x -> x.getValue().hasBuilds())) ? new BuildOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
+                pfa.hasBuilds() ? new BuildConfigOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
+                pfa.hasBuilds() ? new BuildOperator(vertx, client.adapt(OpenShiftClient.class)) : null,
                 new CrdOperator<>(vertx, client, Kafka.class, KafkaList.class, Kafka.RESOURCE_KIND),
                 new CrdOperator<>(vertx, client, KafkaConnect.class, KafkaConnectList.class, KafkaConnect.RESOURCE_KIND),
                 new CrdOperator<>(vertx, client, KafkaBridge.class, KafkaBridgeList.class, KafkaBridge.RESOURCE_KIND),
@@ -417,54 +302,12 @@ public class ResourceOperatorSupplier {
                 new StrimziPodSetOperator(vertx, client),
                 new StorageClassOperator(vertx, client),
                 new NodeOperator(vertx, client),
-                new ServiceExportOperator(vertx, client),
                 kafkaAgentClientProvider,
                 metricsProvider,
                 adminClientProvider,
                 restartEventPublisher,
                 new DefaultSharedEnvironmentProvider(),
                 new BrokersInUseCheck());
-
-        // Initialize stretch operators only if remoteClientSupplier is provided
-        if (remoteClientSupplier != null) {
-            LOGGER.info("Initializing stretch operators. Central cluster ID: '{}'", centralClusterId);
-            // Add central cluster ServiceExportOperator using the central cluster's client
-            if (centralClusterId != null) {
-                stretchServiceExportOperators.put(centralClusterId, new ServiceExportOperator(vertx, client));
-                LOGGER.info("Initialized ServiceExportOperator for central cluster '{}'", centralClusterId);
-            } else {
-                LOGGER.warn("Central cluster ID is null! Cannot initialize ServiceExportOperator for central cluster");
-            }
-
-            LOGGER.info("Initializing stretch operators for {} remote clusters", remoteClientSupplier.getRemoteClients().size());
-            for (String targetCluster : remoteClientSupplier.getRemoteClients().keySet()) {
-                KubernetesClient stretchClient = remoteClientSupplier.getRemoteClient(targetCluster);
-
-                if (stretchClient == null) {
-                    LOGGER.error("Remote client for cluster '{}' is null! Skipping operator initialization.", targetCluster);
-                    continue;
-                }
-
-                LOGGER.info("Initializing stretch operators for cluster '{}' with API server: {}",
-                           targetCluster, stretchClient.getConfiguration().getMasterUrl());
-
-                stretchStrimziPodsetOperators.put(targetCluster, new StrimziPodSetOperator(vertx, stretchClient));
-                stretchServiceAccountOperations.put(targetCluster, new ServiceAccountOperator(vertx, stretchClient));
-                stretchPodOperators.put(targetCluster, new PodOperator(vertx, stretchClient));
-                stretchSecretOperations.put(targetCluster, new SecretOperator(vertx, stretchClient));
-                stretchServiceOperations.put(targetCluster, new ServiceOperator(vertx, stretchClient));
-                stretchRouteOperations.put(targetCluster, new RouteOperator(vertx, stretchClient.adapt(OpenShiftClient.class)));
-                stretchIngressOperations.put(targetCluster, new IngressOperator(vertx, stretchClient));
-                stretchConfigMapOperations.put(targetCluster, new ConfigMapOperator(vertx, stretchClient));
-                stretchServiceExportOperators.put(targetCluster, new ServiceExportOperator(vertx, stretchClient));
-                stretchPvcOperations.put(targetCluster, new PvcOperator(vertx, stretchClient));
-                stretchStorageClassOperations.put(targetCluster, new StorageClassOperator(vertx, stretchClient));
-                stretchClusterRoleBindingOperators.put(targetCluster, new ClusterRoleBindingOperator(vertx, stretchClient));
-
-                LOGGER.info("Successfully initialized stretch operators for cluster '{}'", targetCluster);
-            }
-        }
-
     }
 
     /**
@@ -497,7 +340,6 @@ public class ResourceOperatorSupplier {
      * @param strimziPodSetOperator                 StrimziPodSet operator
      * @param storageClassOperator                  StorageClass operator
      * @param nodeOperator                          Node operator
-     * @param serviceExportOperator                 Service Export Operator
      * @param kafkaAgentClientProvider              Kafka Agent client provider
      * @param metricsProvider                       Metrics provider
      * @param adminClientProvider                   Kafka Admin client provider
@@ -533,7 +375,6 @@ public class ResourceOperatorSupplier {
                                     StrimziPodSetOperator strimziPodSetOperator,
                                     StorageClassOperator storageClassOperator,
                                     NodeOperator nodeOperator,
-                                    ServiceExportOperator serviceExportOperator,
                                     KafkaAgentClientProvider kafkaAgentClientProvider,
                                     MetricsProvider metricsProvider,
                                     AdminClientProvider adminClientProvider,
@@ -567,7 +408,6 @@ public class ResourceOperatorSupplier {
         this.kafkaNodePoolOperator = kafkaNodePoolOperator;
         this.strimziPodSetOperator = strimziPodSetOperator;
         this.nodeOperator = nodeOperator;
-        this.serviceExportOperator = serviceExportOperator;
         this.kafkaAgentClientProvider = kafkaAgentClientProvider;
         this.metricsProvider = metricsProvider;
         this.adminClientProvider = adminClientProvider;

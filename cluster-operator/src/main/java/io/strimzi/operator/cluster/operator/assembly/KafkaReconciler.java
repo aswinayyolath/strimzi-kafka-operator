@@ -122,7 +122,6 @@ public class KafkaReconciler {
     private final String operatorNamespace;
     private final Labels operatorNamespaceLabels;
     private final PlatformFeaturesAvailability pfa;
-    private final Map<String, PlatformFeaturesAvailability> remotePfas;
     private final ImagePullPolicy imagePullPolicy;
     private final List<LocalObjectReference> imagePullSecrets;
     private final List<Integer> previousNodeIds;
@@ -181,7 +180,6 @@ public class KafkaReconciler {
      * @param config                    Cluster Operator Configuration
      * @param supplier                  Supplier with Kubernetes Resource Operators
      * @param pfa                       PlatformFeaturesAvailability describing the environment we run in
-     * @param remotePfas                PlatformFeaturesAvailability describing the environment remote clusters run in
      * @param vertx                     Vert.x instance
      */
     public KafkaReconciler(
@@ -194,7 +192,6 @@ public class KafkaReconciler {
             ClusterOperatorConfig config,
             ResourceOperatorSupplier supplier,
             PlatformFeaturesAvailability pfa,
-            Map<String, PlatformFeaturesAvailability> remotePfas,
             Vertx vertx
     ) {
         this.reconciliation = reconciliation;
@@ -211,7 +208,6 @@ public class KafkaReconciler {
         this.isNetworkPolicyGeneration = config.isNetworkPolicyGeneration();
         this.isKafkaNodePoolsEnabled = ReconcilerUtils.nodePoolsEnabled(kafkaCr);
         this.pfa = pfa;
-        this.remotePfas = remotePfas;
         this.imagePullPolicy = config.getImagePullPolicy();
         this.imagePullSecrets = config.getImagePullSecrets();
         this.previousNodeIds = kafkaCr.getStatus() != null ? kafkaCr.getStatus().getRegisteredNodeIds() : null;

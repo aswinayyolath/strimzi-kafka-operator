@@ -160,17 +160,10 @@ public class JbodStorageMockTest {
         PlatformFeaturesAvailability pfa = new PlatformFeaturesAvailability(false, KubernetesVersion.MINIMAL_SUPPORTED_VERSION);
         // creating the Kafka operator
         ResourceOperatorSupplier ros =
-                new ResourceOperatorSupplier(vertx,
-                client,
-                ResourceUtils.adminClientProvider(),
-                ResourceUtils.kafkaAgentClientProvider(),
-                ResourceUtils.metricsProvider(),
-                pfa,
-                Map.of(),
-                null
-        );
+                new ResourceOperatorSupplier(vertx, client, ResourceUtils.adminClientProvider(),
+                        ResourceUtils.kafkaAgentClientProvider(), ResourceUtils.metricsProvider(), pfa);
 
-        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, ros.kafkaOperator, ros.connectOperator, ros.mirrorMaker2Operator, ros.strimziPodSetOperator, ros.podOperations, ros.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()), false, null);
+        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, ros.kafkaOperator, ros.connectOperator, ros.mirrorMaker2Operator, ros.strimziPodSetOperator, ros.podOperations, ros.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         podSetController.start();
 
         this.operator = new KafkaAssemblyOperator(JbodStorageMockTest.vertx, pfa, new MockCertManager(),

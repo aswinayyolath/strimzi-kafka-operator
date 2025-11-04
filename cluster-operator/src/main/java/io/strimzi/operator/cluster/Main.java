@@ -38,7 +38,6 @@ import org.apache.logging.log4j.Logger;
 
 import java.security.Security;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -170,9 +169,7 @@ public class Main {
                 client,
                 metricsProvider,
                 pfa,
-                remotePfas != null ? remotePfas : new HashMap<>(),
-                config.getOperatorName(),
-                remoteClientSupplier  // Can be null if no remote clusters
+                config.getOperatorName()
         );
 
         // Initialize the PodSecurityProvider factory to provide the user configured provider
@@ -197,7 +194,7 @@ public class Main {
 
             // Add stretch capabilities if configured
             if (remoteResourceOperatorSupplier != null) {
-                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remotePfas, remoteResourceOperatorSupplier);
+                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remoteResourceOperatorSupplier);
             }
             kafkaConnectClusterOperations = new KafkaConnectAssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaMirrorMaker2AssemblyOperator = new KafkaMirrorMaker2AssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);

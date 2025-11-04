@@ -79,8 +79,8 @@ public class StrimziPodSetController implements Runnable {
     private final Informer<KafkaConnect> kafkaConnectInformer;
     private final Informer<KafkaMirrorMaker2> kafkaMirrorMaker2Informer;
 
-    private final boolean isStretchConfigured;
-    private final String centralClusterId;
+    private boolean isStretchConfigured;
+    private String centralClusterId;
 
     /**
      * Creates the StrimziPodSet controller. The controller should normally exist once per operator for cluster-wide mode
@@ -97,8 +97,6 @@ public class StrimziPodSetController implements Runnable {
      * @param podOperator                   Pod operator for managing pods
      * @param metricsProvider               Metrics provider
      * @param podSetControllerWorkQueueSize Indicates the size of the StrimziPodSetController work queue
-     * @param isStretchConfigured           Indicates weather the stretch cluster config is set properly at env
-     * @param centralClusterId              Indicates the central cluster id for a stretched kafka configuration
      */
     public StrimziPodSetController(
             String watchedNamespace,
@@ -109,9 +107,7 @@ public class StrimziPodSetController implements Runnable {
             StrimziPodSetOperator strimziPodSetOperator,
             PodOperator podOperator,
             MetricsProvider metricsProvider,
-            int podSetControllerWorkQueueSize,
-            boolean isStretchConfigured,
-            String centralClusterId
+            int podSetControllerWorkQueueSize
     ) {
         this.podOperator = podOperator;
         this.strimziPodSetOperator = strimziPodSetOperator;
@@ -135,9 +131,18 @@ public class StrimziPodSetController implements Runnable {
         this.podInformer = podOperator.informer(watchedNamespace, POD_LABEL_SELECTOR, DEFAULT_RESYNC_PERIOD_MS);
 
         this.controllerThread = new Thread(this, "StrimziPodSetController");
-
+    }
+    /**
+     * Create StrimziPodSetController with stretch capabilites
+     * @param isStretchConfigured           Indicates weather the stretch cluster config is set properly at env
+     * @param centralClusterId              Indicates the central cluster id for a stretched kafka configuration
+     * @return Instance of StrimziPodSetController with stretch capabilites
+     */
+    public StrimziPodSetController withStretchCapabilities(boolean isStretchConfigured, String centralClusterId) {
         this.isStretchConfigured = isStretchConfigured;
         this.centralClusterId = centralClusterId;
+
+        return this;
     }
 
     protected ControllerMetricsHolder metrics()   {
