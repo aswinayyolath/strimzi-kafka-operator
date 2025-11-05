@@ -2338,7 +2338,7 @@ public class StretchClusterReconciler {
                         reconciliation, clusterId);
                 
                 // Update ServiceExport in central cluster with Kafka CR as owner
-                ServiceExportOperator centralServiceExportOp = centralSupplier.serviceExportOperator;
+                ServiceExportOperator centralServiceExportOp = remoteOperatorSupplier.centralServiceExportOperator;
                 if (centralServiceExportOp != null) {
                     String serviceExportName = kafka.getMetadata().getName() + "-kafka-brokers";
                     ServiceExport serviceExport = centralServiceExportOp.get(namespace, serviceExportName);

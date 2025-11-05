@@ -156,10 +156,8 @@ public class KafkaMirrorMaker2AssemblyOperatorMockTest {
                 new DefaultAdminClientProvider(),
                 new DefaultKafkaAgentClientProvider(),
                 ResourceUtils.metricsProvider(),
-                PFA,
-                Map.of(),
-                null);
-        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()), false, null);
+                PFA);
+        podSetController = new StrimziPodSetController(namespace, Labels.EMPTY, supplier.kafkaOperator, supplier.connectOperator, supplier.mirrorMaker2Operator, supplier.strimziPodSetOperator, supplier.podOperations, supplier.metricsProvider, Integer.parseInt(ClusterOperatorConfig.POD_SET_CONTROLLER_WORK_QUEUE_SIZE.defaultValue()));
         podSetController.start();
     }
 

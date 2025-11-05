@@ -110,9 +110,7 @@ public class RemoteResourceOperatorSupplier {
                     stretchClient,
                     new MicrometerMetricsProvider(BackendRegistries.getDefaultNow()),
                     remotePfas.get(targetCluster),
-                    new HashMap<>(),  // No nested remote PFAs
-                    operatorName,
-                    null  // No nested remote client supplier
+                    operatorName
                 )
             );
             

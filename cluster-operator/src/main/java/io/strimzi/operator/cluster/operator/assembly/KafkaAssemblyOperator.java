@@ -112,7 +112,6 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
     private final CrdOperator<KubernetesClient, Kafka, KafkaList> kafkaOperator;
     private final StrimziPodSetOperator strimziPodSetOperator;
     private final CrdOperator<KubernetesClient, KafkaNodePool, KafkaNodePoolList> nodePoolOperator;
-    private Map<String, PlatformFeaturesAvailability> remotePfas;
     protected Clock clock;
     private StretchClusterReconciler stretchReconciler;
     private StretchNetworkingProvider stretchNetworkingProvider;
@@ -145,12 +144,10 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      * Add stretch cluster capabilities to this operator.
      * This method should be called after construction if stretch cluster mode is enabled.
      *
-     * @param remotePfas Platform features availability properties for remote clusters
      * @param remoteResourceOperatorSupplier Supplies the operators for remote clusters
      * @return This operator instance for method chaining
      */
     public KafkaAssemblyOperator withStretchCapabilities(
-            Map<String, PlatformFeaturesAvailability> remotePfas,
             io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier) {
 
         if (config.isStretchClusterConfigured()) {
@@ -165,8 +162,6 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
             // But we need to support MCS for now and discuss about this later
 
             try {
-                this.remotePfas = remotePfas;
-
                 // Get the globally initialized networking provider from DnsNameGenerator
                 StretchNetworkingProvider networkingProvider = io.strimzi.operator.cluster.model.DnsNameGenerator.getStretchProvider();
 
@@ -636,7 +631,6 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     config,
                     supplier,
                     pfa,
-                    remotePfas,
                     vertx
             );
         }

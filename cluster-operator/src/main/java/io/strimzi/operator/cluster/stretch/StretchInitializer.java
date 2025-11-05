@@ -186,9 +186,7 @@ public class StretchInitializer {
                 client,
                 new MicrometerMetricsProvider(new CompositeMeterRegistry()),
                 centralPfa,
-                new HashMap<>(),  // No remote PFAs for central supplier
-                config.getOperatorName(),
-                null  // No remote client supplier for central
+                config.getOperatorName()
             );
 
             // Create and initialize the networking provider

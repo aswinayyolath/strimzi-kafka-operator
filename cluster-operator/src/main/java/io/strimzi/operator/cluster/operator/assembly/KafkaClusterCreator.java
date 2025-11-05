@@ -347,7 +347,7 @@ public class KafkaClusterCreator {
         List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, sharedEnvironmentProvider);
         String clusterId = NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs);
 
-        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, null, versionChange, clusterId, sharedEnvironmentProvider);
+        return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, versionChange, clusterId, sharedEnvironmentProvider);
     }
 
 }
