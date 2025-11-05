@@ -252,6 +252,10 @@
             <artifactId>vertx-micrometer-metrics</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-model-apiextensions</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.mock-server</groupId>
             <artifactId>mockserver-netty</artifactId>
             <version>${mockserver.version}</version>
@@ -331,6 +335,8 @@
                                 <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-common</ignoredUnusedDeclaredDependency>
                                 <!-- Needed at runtime by Fabric8 -->
                                 <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-coordination</ignoredUnusedDeclaredDependency>
+                                <!-- Needed for CRD validation in StretchClusterValidator -->
+                                <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-apiextensions</ignoredUnusedDeclaredDependency>
                             </ignoredNonTestScopedDependencies>
                         </configuration>
                     </execution>
