@@ -70,6 +70,8 @@ public final class StretchKafkaListenersReconciler {
     private final Kafka kafka;
     /** Kafka cluster model. */
     private final KafkaCluster kafkaCluster;
+    /** Kafka cluster model. */
+    private final StretchKafkaCluster stretchKafkaCluster;
     /** List of KafkaNodePool CRs. */
     private final List<KafkaNodePool> nodePools;
     /** Set of target cluster IDs. */
@@ -163,6 +165,7 @@ public final class StretchKafkaListenersReconciler {
      * @param reconciliationParam Reconciliation context
      * @param kafkaParam Kafka custom resource
      * @param kafkaClusterParam Kafka cluster model
+     * @param stretchKafkaClusterParam Stretch Kafka cluster model
      * @param nodePoolsParam List of KafkaNodePool CRs
      * @param targetClusterIdsParam Target cluster IDs
      * @param centralClusterIdParam Central cluster ID
@@ -174,6 +177,7 @@ public final class StretchKafkaListenersReconciler {
             final Reconciliation reconciliationParam,
             final Kafka kafkaParam,
             final KafkaCluster kafkaClusterParam,
+            final StretchKafkaCluster stretchKafkaClusterParam,
             final List<KafkaNodePool> nodePoolsParam,
             final Set<String> targetClusterIdsParam,
             final String centralClusterIdParam,
@@ -183,6 +187,7 @@ public final class StretchKafkaListenersReconciler {
         this.reconciliation = reconciliationParam;
         this.kafka = kafkaParam;
         this.kafkaCluster = kafkaClusterParam;
+        this.stretchKafkaCluster = stretchKafkaClusterParam;
         this.nodePools = nodePoolsParam;
         this.targetClusterIds = targetClusterIdsParam;
         this.centralClusterId = centralClusterIdParam;
@@ -255,7 +260,7 @@ public final class StretchKafkaListenersReconciler {
             // 4. Per-broker services (for route, cluster-ip,
             // loadbalancer, nodeport listeners)
             Map<String, List<Service>> clusteredPerBrokerServices =
-                    kafkaCluster.generateClusteredPerPodServices();
+                    stretchKafkaCluster.generateClusteredPerPodServices();
             List<Service> perBrokerServices =
                     clusteredPerBrokerServices.getOrDefault(clusterId,
                             Collections.emptyList());
@@ -347,7 +352,7 @@ public final class StretchKafkaListenersReconciler {
 
             // Get per-broker routes for this cluster
             Map<String, List<Route>>
-                    clusteredRoutes = kafkaCluster.generateClusteredExternalRoutes();
+                    clusteredRoutes = stretchKafkaCluster.generateClusteredExternalRoutes();
             List<Route> perBrokerRoutes = clusteredRoutes.getOrDefault(clusterId, Collections.emptyList());
             routes.addAll(perBrokerRoutes);
 
@@ -418,7 +423,7 @@ public final class StretchKafkaListenersReconciler {
 
             // Get per-broker ingresses for this cluster
             Map<String, List<Ingress>>
-                    clusteredIngresses = kafkaCluster.generateClusteredExternalIngresses();
+                    clusteredIngresses = stretchKafkaCluster.generateClusteredExternalIngresses();
             List<Ingress> perBrokerIngresses = clusteredIngresses.getOrDefault(clusterId, Collections.emptyList());
             ingresses.addAll(perBrokerIngresses);
 

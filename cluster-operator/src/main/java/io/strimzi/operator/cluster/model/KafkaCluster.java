@@ -12,7 +12,6 @@ import io.fabric8.kubernetes.api.model.ContainerPort;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
-import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import io.fabric8.kubernetes.api.model.Secret;
@@ -467,26 +466,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
     /**
-     * Generates list of references to Kafka nodes for this Kafka cluster, in the specified kube cluster.
-     * The references contain both the pod name and the ID of the Kafka node.
-     * @param targetClusterId   The cluster Id of the kube cluster where the nodes are deployed
-     *
-     * @return  Set of Kafka node references
-     */
-    public Set<NodeRef> nodesAtCluster(String targetClusterId) {
-        Set<NodeRef> nodes = new LinkedHashSet<>();
-        List<KafkaPool> pools = nodePools.stream()
-                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
-                                        .toList();
-
-        for (KafkaPool pool : nodePools) {
-            nodes.addAll(pool.nodes());
-        }
-
-        return nodes;
-    }
-
-    /**
      * Generates list of Kafka node IDs that are going to be added to the Kafka cluster as brokers.
      * This reports all broker nodes on cluster creation as well as the newly added ones on scaling up.
      *
@@ -496,26 +475,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         Set<NodeRef> nodes = new LinkedHashSet<>();
 
         for (KafkaPool pool : nodePools)    {
-            nodes.addAll(pool.scaleUpNodes());
-        }
-
-        return nodes;
-    }
-
-    /**
-     * Generates list of Kafka node IDs that are going to be added to the Kafka cluster in a streched cluster as brokers.
-     * This reports all broker nodes on cluster creation as well as the newly added ones on scaling up.
-     * @param targetClusterId  The stretch cluster ID where the nodes are going to be created
-     *
-     *
-     * @return  Set of Kafka node IDs which are going to be added as brokers.
-     */
-    public Set<NodeRef> addedNodesAtCluster(String targetClusterId) {
-        Set<NodeRef> nodes = new LinkedHashSet<>();
-        List<KafkaPool> pools = nodePools.stream()
-                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
-                                        .toList();
-        for (KafkaPool pool : pools) {
             nodes.addAll(pool.scaleUpNodes());
         }
 
@@ -535,15 +494,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return nodes;
-    }
-
-    /**
-     * Returns the list of KafkaNodePools for this KafkaCluster.
-     *
-     * @return List of KafkaNodePools
-     */
-    public List<KafkaPool> getNodePools() {
-        return nodePools;
     }
 
     /**
@@ -918,22 +868,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
     /**
-     * Generates Map of targetCluster and the list of corresponding
-     * per pod services.
-     *
-     * @return The Map targetCluster and their generated Services
-     */
-    public Map<String, List<Service>> generateClusteredPerPodServices() {
-        Map<String, List<Service>> result = new HashMap<>();
-
-        for (String targetClusterId : targetClusterIds) {
-            result.put(targetClusterId, generatePerPodServices(targetClusterId));
-        }
-
-        return result;
-    }
-
-    /**
      * Generates list of per-pod service.
      * If target Cluster is given, the services for that target cluster only will
      * be returned.
@@ -942,6 +876,18 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      */
     public List<Service> generatePerPodServices() {
         return generatePerPodServices(null);
+    }
+
+    /**
+     * Checks if the given cluster ID represents a remote cluster, i.e., it exists and is not equal to the central cluster ID.
+     * @param targetClusterId   The target cluster ID to compare against the central cluster ID.
+     *
+     * @return                  true if the targetClusterId is non-null, non-empty, and different from the centralClusterId.
+     */
+    public boolean isRemoteClusterId(String targetClusterId) {
+        return Optional.ofNullable(targetClusterId)
+                    .filter(id -> !id.isEmpty() && !id.equals(centralClusterId))
+                    .isPresent();
     }
 
     /**
@@ -1107,22 +1053,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
     /**
-     * Generates Map of targetCluster and the list of corresponding
-     * per pod external Routes
-     *
-     * @return The Map of targetClusters and their generated Routes
-     */
-    public Map<String, List<Route>> generateClusteredExternalRoutes() {
-        Map<String, List<Route>> result = new HashMap<>();
-
-        for (String targetClusterId : targetClusterIds) {
-            result.put(targetClusterId, generateExternalRoutes(targetClusterId));
-        }
-
-        return result;
-    }
-
-    /**
      * Generates list of per-pod routes. These routes are used for exposing it externally using OpenShift Routes.
      *
      * @return The list with generated Routes
@@ -1263,22 +1193,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return ingresses;
-    }
-
-    /**
-     * Generates Map of targetCluster and the list of corresponding
-     * per pod external Ingresses
-     *
-     * @return The Map targetCluster and their generated Ingresses
-     */
-    public Map<String, List<Ingress>> generateClusteredExternalIngresses() {
-        Map<String, List<Ingress>> result = new HashMap<>();
-
-        for (String targetClusterId : targetClusterIds) {
-            result.put(targetClusterId, generateExternalIngresses(targetClusterId));
-        }
-
-        return result;
     }
 
     /**
@@ -1428,46 +1342,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         controllerAnnotations.put(Annotations.ANNO_STRIMZI_IO_STORAGE, ModelUtils.encodeStorageToJson(storage));
 
         return controllerAnnotations;
-    }
-
-    /**
-     * Generates a clustered StrimziPodSet for the stretched kafka cluster
-     *
-     * @param isOpenShift            Flags whether we are on OpenShift or not
-     * @param imagePullPolicy        Image pull policy which will be used by the pods
-     * @param imagePullSecrets       List of image pull secrets
-     * @param podAnnotationsProvider Function which provides annotations for given pod based on its broker ID. The
-     *                               annotations for each pod are different due to the individual configurations.
-     *                               So they need to be dynamically generated though this function instead of just
-     *                               passed as Map.
-     * @param centralClusterId       Stretch Cluster Central Cluster ID
-     *
-     * @return List of generated StrimziPodSets with Kafka pods
-     */
-    public Map<String, List<StrimziPodSet>> generateClusteredPodSets(boolean isOpenShift,
-        ImagePullPolicy imagePullPolicy,
-        List<LocalObjectReference> imagePullSecrets,
-        Function<NodeRef, Map<String, String>> podAnnotationsProvider,
-        String centralClusterId) {
-
-        Map<String, List<StrimziPodSet>> podSets = new HashMap<>();
-
-        for (String targetCluster : targetClusterIds) {
-            podSets
-                .computeIfAbsent(targetCluster, k -> new ArrayList<>())
-                .addAll(
-                    generatePodSets(
-                        isOpenShift,
-                        imagePullPolicy,
-                        imagePullSecrets,
-                        podAnnotationsProvider,
-                        targetCluster,
-                        centralClusterId
-                    )
-                );
-        }
-
-        return podSets;
     }
 
     /**
@@ -2330,54 +2204,6 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      */
     public boolean isStretchModeEnabled() {
         return isStretchMode;
-    }
-
-    /**
-     * @return  Returns the central cluster Id of a stretched kafka cluster
-     */
-    public String getCentralClusterId() {
-        return centralClusterId;
-    }
-
-    /**
-     * Checks if the given cluster ID represents a remote cluster, i.e., it exists and is not equal to the central cluster ID.
-     * @param targetClusterId   The target cluster ID to compare against the central cluster ID.
-     *
-     * @return                  true if the targetClusterId is non-null, non-empty, and different from the centralClusterId.
-     */
-    public boolean isRemoteClusterId(String targetClusterId) {
-        return Optional.ofNullable(targetClusterId)
-                    .filter(id -> !id.isEmpty() && !id.equals(centralClusterId))
-                    .isPresent();
-    }
-
-
-    /**
-     * @return  Returns target cluster Ids defined in KafkaNodePools of a kafka cluster
-     */
-    public List<String> getTargetClusterIds() {
-        return targetClusterIds;
-    }
-
-    /**
-     * @return  Returns cluster Ids defined in STRIMZI_REMOTE_KUBE_CONFIG and STRIMZI_CENTRAL_CLUSTER_ID env
-     */
-    public List<String> getClusterIds() {
-        return clusterIds;
-    }
-
-    /**
-     * @return  Returns the stretch networking provider (can be null for non-stretch clusters)
-     */
-    public StretchNetworkingProvider getStretchNetworkingProvider() {
-        return stretchNetworkingProvider;
-    }
-
-    /**
-     * @return  Returns the owner reference for this Kafka cluster
-     */
-    public OwnerReference getOwnerReference() {
-        return ownerReference;
     }
 
     /**
