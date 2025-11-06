@@ -124,6 +124,8 @@ public class StretchClusterReconciler {
     private Set<String> targetClusterIds;
     /** KafkaCluster model - created once per reconciliation. */
     private KafkaCluster kafkaCluster;
+    /** StretchKafkaCluster model - created once per reconciliation. */
+    private StretchKafkaCluster stretchKafkaCluster;
 
     // Reconciliation results - populated during reconciliation
     /** Cluster CA. */
@@ -322,7 +324,8 @@ public class StretchClusterReconciler {
                     
                     // Create KafkaCluster model once, used by all subsequent steps
                     this.kafkaCluster = createKafkaClusterModel(reconciliation, kafka, nodePools, targetClusterIds);
-                    LOGGER.debug("{}: Created KafkaCluster model with {} nodes across {} clusters",
+
+                    LOGGER.debug("{}: Created KafkaCluster model with {} nodes across {} clusters", 
                         reconciliation, this.kafkaCluster.nodes().size(), targetClusterIds.size());
                     
                     return Future.succeededFuture();
@@ -343,7 +346,7 @@ public class StretchClusterReconciler {
             .compose(v -> {
                 // Use the KafkaCluster model created once above
                 StretchKafkaListenersReconciler listenersReconciler = new StretchKafkaListenersReconciler(
-                    reconciliation, kafka, this.kafkaCluster, nodePools, targetClusterIds, centralClusterId, centralSupplier, remoteOperatorSupplier, networkingProvider
+                    reconciliation, kafka, this.kafkaCluster, this.stretchKafkaCluster, nodePools, targetClusterIds, centralClusterId, centralSupplier, remoteOperatorSupplier, networkingProvider
                 );
                 return listenersReconciler.reconcile();
             })
@@ -1198,7 +1201,7 @@ public class StretchClusterReconciler {
         // Generate clustered PodSets using existing Strimzi logic
         // This creates PodSets per cluster with proper configuration
         Map<String, List<io.strimzi.api.kafka.model.podset.StrimziPodSet>> clusteredPodSets =
-            this.kafkaCluster.generateClusteredPodSets(
+            this.stretchKafkaCluster.generateClusteredPodSets(
                 false,  // isOpenshift - get from PlatformFeaturesAvailability
                 null,   // imagePullPolicy
                 null,   // imagePullSecrets
@@ -1367,7 +1370,7 @@ public class StretchClusterReconciler {
             }
 
             // Get nodes for this cluster
-            Set<NodeRef> nodes = kafkaCluster.nodesAtCluster(clusterId);
+            Set<NodeRef> nodes = stretchKafkaCluster.nodesAtCluster(clusterId);
 
             for (NodeRef node : nodes) {
                 String podName = node.podName();
@@ -1530,6 +1533,7 @@ public class StretchClusterReconciler {
             sharedEnvironmentProvider
         );
 
+
         // Use the provided cluster ID if available, otherwise get/generate one
         // This is Critical: for scale operations, we MUST use the existing cluster ID
         // to prevent INCONSISTENT_CLUSTER_ID errors
@@ -1542,8 +1546,10 @@ public class StretchClusterReconciler {
             LOGGER.debug("{}: Generated/retrieved cluster ID: {}", reconciliation, kafkaClusterId);
         }
 
+
+
         // Use the stretch-specific factory method
-        return KafkaCluster.forStretchFromCrd(
+        KafkaCluster result =  KafkaCluster.forStretchFromCrd(
             reconciliation,
             kafka,
             pools,
@@ -1555,6 +1561,10 @@ public class StretchClusterReconciler {
             new ArrayList<>(targetClusterIds),
             new ArrayList<>(targetClusterIds)  // clusterIds = targetClusterIds for now
         );
+
+        this.stretchKafkaCluster = new StretchKafkaCluster(reconciliation, kafka, result, pools, centralClusterId, targetClusterIds);
+
+        return result;
     }
 
     /**
