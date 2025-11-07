@@ -35,7 +35,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * 
  * This test class validates:
  * - Constructor parameter validation
- * - ServiceExportOperator creation for central and remote clusters
  * - ResourceOperatorSupplier creation for remote clusters
  * - Retrieval of operators by cluster ID
  * 
@@ -196,65 +195,8 @@ public class RemoteResourceOperatorSupplierTest {
         
 
         assertThat("Supplier should be created", supplier, is(notNullValue()));
-        assertThat("Central ServiceExportOperator should be created", 
-                  supplier.centralServiceExportOperator, is(notNullValue()));
-        assertThat("ServiceExportOperators map should contain 3 entries (central + 2 remote)", 
-                  supplier.serviceExportOperators.size(), is(3));
         assertThat("RemoteResourceOperators map should contain 2 entries", 
                   supplier.remoteResourceOperators.size(), is(2));
-    }
-    
-    @ParallelTest
-    public void testCentralServiceExportOperatorCreated() {
- 
-        RemoteClientSupplier remoteClientSupplier = createRemoteClientSupplier();
-        Map<String, PlatformFeaturesAvailability> remotePfas = createRemotePfas();
-        
- 
-        RemoteResourceOperatorSupplier supplier = new RemoteResourceOperatorSupplier(
-            vertx,
-            centralClient,
-            remoteClientSupplier,
-            remotePfas,
-            OPERATOR_NAME,
-            CENTRAL_CLUSTER_ID
-        );
-        
-
-        assertThat("Central ServiceExportOperator should be created", 
-                  supplier.centralServiceExportOperator, is(notNullValue()));
-        assertThat("ServiceExportOperators should contain central cluster", 
-                  supplier.serviceExportOperators.containsKey(CENTRAL_CLUSTER_ID), is(true));
-        assertThat("Central ServiceExportOperator should match", 
-                  supplier.serviceExportOperators.get(CENTRAL_CLUSTER_ID), 
-                  is(supplier.centralServiceExportOperator));
-    }
-    
-    @ParallelTest
-    public void testRemoteServiceExportOperatorsCreated() {
- 
-        RemoteClientSupplier remoteClientSupplier = createRemoteClientSupplier();
-        Map<String, PlatformFeaturesAvailability> remotePfas = createRemotePfas();
-        
- 
-        RemoteResourceOperatorSupplier supplier = new RemoteResourceOperatorSupplier(
-            vertx,
-            centralClient,
-            remoteClientSupplier,
-            remotePfas,
-            OPERATOR_NAME,
-            CENTRAL_CLUSTER_ID
-        );
-        
-
-        assertThat("ServiceExportOperators should contain remote cluster A", 
-                  supplier.serviceExportOperators.containsKey(REMOTE_CLUSTER_A_ID), is(true));
-        assertThat("ServiceExportOperators should contain remote cluster B", 
-                  supplier.serviceExportOperators.containsKey(REMOTE_CLUSTER_B_ID), is(true));
-        assertThat("ServiceExportOperator for cluster A should not be null", 
-                  supplier.serviceExportOperators.get(REMOTE_CLUSTER_A_ID), is(notNullValue()));
-        assertThat("ServiceExportOperator for cluster B should not be null", 
-                  supplier.serviceExportOperators.get(REMOTE_CLUSTER_B_ID), is(notNullValue()));
     }
     
     @ParallelTest
@@ -302,10 +244,6 @@ public class RemoteResourceOperatorSupplierTest {
         
 
         assertThat("Supplier should be created", supplier, is(notNullValue()));
-        assertThat("Central ServiceExportOperator should be created", 
-                  supplier.centralServiceExportOperator, is(notNullValue()));
-        assertThat("ServiceExportOperators should only contain central cluster", 
-                  supplier.serviceExportOperators.size(), is(1));
         assertThat("RemoteResourceOperators should be empty", 
                   supplier.remoteResourceOperators.size(), is(0));
     }

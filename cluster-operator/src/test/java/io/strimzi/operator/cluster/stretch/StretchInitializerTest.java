@@ -229,10 +229,6 @@ public class StretchInitializerTest {
                 // Assert
                 RemoteResourceOperatorSupplier supplier = result.getRemoteResourceOperatorSupplier();
                 assertThat("Remote supplier should be created", supplier, is(notNullValue()));
-                assertThat("Remote supplier should have service export operators", 
-                          supplier.serviceExportOperators, is(notNullValue()));
-                assertThat("Remote supplier should have central service export operator", 
-                          supplier.centralServiceExportOperator, is(notNullValue()));
                 
                 context.completeNow();
             })));
