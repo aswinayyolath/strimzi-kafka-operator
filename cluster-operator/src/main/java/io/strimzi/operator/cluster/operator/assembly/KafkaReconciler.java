@@ -171,6 +171,8 @@ public class KafkaReconciler {
     /* test */ Map<String, PvcOperator> stretchPvcOperators;
     /* test */ Map<String, StorageClassOperator> stretchStorageClassOperators;
     /* test */ io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider;
+    /* test */ io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier;
+    /* test */ io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteSupplier;
 
     // State of the reconciliation => these objects might change during the reconciliation (the collection objects are
     // marked as final, but their contents is modified during the reconciliation)
@@ -272,7 +274,12 @@ public class KafkaReconciler {
     public void setupStretchClusterConfig(
             io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier,
             io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider,
-            String centralClusterId) {
+            String centralClusterId,
+            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier) {
+
+        // Store suppliers for use in stretch listener reconciler
+        this.centralSupplier = centralSupplier;
+        this.remoteSupplier = remoteResourceOperatorSupplier;
 
         // Set up operator maps for remote clusters
         this.stretchServiceAccountOperators = new HashMap<>();
@@ -864,7 +871,7 @@ public class KafkaReconciler {
 
         // Get the cluster ID from the pool's annotation
         for (KafkaNodePool knp : kafkaNodePoolCrs) {
-            if (knp.getMetadata().getName().equals(pool.poolName())) {
+            if (knp.getMetadata().getName().equals(pool.name())) {
                 if (knp.getMetadata().getAnnotations() != null) {
                     String clusterId = knp.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
                     if (clusterId != null && !clusterId.isEmpty()) {
@@ -1402,71 +1409,20 @@ public class KafkaReconciler {
      */
     protected io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler stretchListenerReconciler() {
         // Create StretchKafkaCluster wrapper
+        List<KafkaPool> pools = new ArrayList<>();
+        for (int i = 0; i < kafka.pools().size(); i++) {
+            pools.add(kafka.pools().get(i));
+        }
+        
         io.strimzi.operator.cluster.stretch.StretchKafkaCluster stretchKafkaCluster = 
             new io.strimzi.operator.cluster.stretch.StretchKafkaCluster(
                 reconciliation,
                 kafkaCr,
                 kafka,
-                new ArrayList<>(kafka.pools()),
+                pools,
                 stretchCentralClusterId,
                 new HashSet<>(targetClusterIds)
             );
-
-        // Create central supplier wrapper with our operators
-        io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier = 
-            new io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier(
-                vertx,
-                null,  // client
-                null,  // zookeeperLeaderFinder
-                adminClientProvider,
-                null,  // zookeeperScalerProvider
-                null,  // metricsProvider
-                pfa,
-                operationTimeoutMs
-            );
-        // Set the operators
-        centralSupplier.serviceAccountOperations = serviceAccountOperator;
-        centralSupplier.strimziPodSetOperator = strimziPodSetOperator;
-        centralSupplier.podOperations = podOperator;
-        centralSupplier.secretOperations = secretOperator;
-        centralSupplier.configMapOperations = configMapOperator;
-        centralSupplier.pvcOperations = pvcOperator;
-        centralSupplier.storageClassOperations = storageClassOperator;
-        centralSupplier.serviceOperations = serviceOperator;
-        centralSupplier.routeOperations = routeOperator;
-        centralSupplier.ingressOperations = ingressOperator;
-
-        // Create remote operator supplier
-        io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteSupplier =
-            new io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier();
-        
-        // Populate remote supplier with stretch operators
-        for (String clusterId : targetClusterIds) {
-            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier supplier =
-                new io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier(
-                    vertx,
-                    null,  // client
-                    null,  // zookeeperLeaderFinder
-                    null,  // adminClientProvider
-                    null,  // zookeeperScalerProvider
-                    null,  // metricsProvider
-                    pfa,
-                    operationTimeoutMs
-                );
-            // Set the operators we already have
-            supplier.serviceAccountOperations = stretchServiceAccountOperators.get(clusterId);
-            supplier.strimziPodSetOperator = stretchStrimziPodsetOperators.get(clusterId);
-            supplier.podOperations = stretchPodOperators.get(clusterId);
-            supplier.secretOperations = stretchSecretOperators.get(clusterId);
-            supplier.configMapOperations = stretchConfigMapOperators.get(clusterId);
-            supplier.pvcOperations = stretchPvcOperators.get(clusterId);
-            supplier.storageClassOperations = stretchStorageClassOperators.get(clusterId);
-            supplier.serviceOperations = serviceOperator;  // Services might be in central cluster
-            supplier.routeOperations = routeOperator;
-            supplier.ingressOperations = ingressOperator;
-            
-            remoteSupplier.remoteResourceOperators.put(clusterId, supplier);
-        }
 
         return new io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler(
                 reconciliation,
@@ -1489,13 +1445,13 @@ public class KafkaReconciler {
      * @return              Converted result in standard format
      */
     private KafkaListenersReconciler.ReconciliationResult convertStretchListenerResult(
-            io.strimzi.operator.cluster.stretch.ListenerReconciliationResult stretchResult) {
+            io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler.ListenerReconciliationResult stretchResult) {
         
         return new KafkaListenersReconciler.ReconciliationResult(
-            stretchResult.getAdvertisedHostnames(),  // Plugin-generated hostnames
-            stretchResult.getAdvertisedPorts(),      // Plugin-generated ports  
-            stretchResult.getBootstrapDnsNames(),    // Plugin-generated bootstrap DNS
-            stretchResult.getBrokerDnsNames(),       // Plugin-generated broker DNS
+            stretchResult.advertisedHostnames(),  // Plugin-generated hostnames
+            stretchResult.advertisedPorts(),      // Plugin-generated ports  
+            stretchResult.bootstrapDnsNames(),    // Plugin-generated bootstrap DNS
+            stretchResult.brokerDnsNames(),       // Plugin-generated broker DNS
             Map.of(),  // bootstrapNodePorts - not used in stretch mode
             List.of()  // listenerStatuses - will be populated separately
         );

@@ -619,7 +619,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                 reconciler.setupStretchClusterConfig(
                     KafkaAssemblyOperator.this.remoteResourceOperatorSupplier,
                     KafkaAssemblyOperator.this.stretchNetworkingProvider,
-                    KafkaAssemblyOperator.this.config.getCentralClusterId()
+                    KafkaAssemblyOperator.this.config.getCentralClusterId(),
+                    KafkaAssemblyOperator.this.resourceOperatorSupplier
                 );
             }
 
