@@ -116,7 +116,7 @@ import static io.strimzi.operator.common.Annotations.ANNO_STRIMZI_SERVER_CERT_HA
  * reconciliation pipeline (although the steps for listener reconciliation are outsourced to the KafkaListenerReconciler)
  * and is also used to store the state between them.
  */
-@SuppressWarnings({"checkstyle:ClassFanOutComplexity"})
+@SuppressWarnings({"checkstyle:ClassFanOutComplexity", "checkstyle:ClassDataAbstractionCoupling"})
 public class KafkaReconciler {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(KafkaReconciler.class.getName());
 
@@ -270,6 +270,7 @@ public class KafkaReconciler {
      * @param remoteResourceOperatorSupplier    Supplier for remote cluster operators
      * @param networkingProvider                Networking provider for stretch clusters
      * @param centralClusterId                  ID of the central cluster
+     * @param centralSupplier                   Supplier for central cluster operators
      */
     public void setupStretchClusterConfig(
             io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier,
@@ -810,8 +811,10 @@ public class KafkaReconciler {
                     // Check if any pod in this PodSet belongs to this cluster
                     return podSet.getSpec().getPods().stream()
                         .anyMatch(podMap -> {
-                            String podName = podMap.get("metadata") != null ? 
-                                ((Map<String, String>) podMap.get("metadata")).get("name") : null;
+                            Object metadataObj = podMap.get("metadata");
+                            @SuppressWarnings("unchecked")
+                            Map<String, String> metadata = metadataObj instanceof Map ? (Map<String, String>) metadataObj : null;
+                            String podName = metadata != null ? metadata.get("name") : null;
                             if (podName == null) {
                                 return false;
                             }
@@ -870,8 +873,10 @@ public class KafkaReconciler {
         }
 
         // Get the cluster ID from the pool's annotation
+        // The pool's component name is in format "clusterName-poolName", so extract just the pool name
+        String poolName = pool.getComponentName().substring(kafka.getComponentName().length() + 1);
         for (KafkaNodePool knp : kafkaNodePoolCrs) {
-            if (knp.getMetadata().getName().equals(pool.name())) {
+            if (knp.getMetadata().getName().equals(poolName)) {
                 if (knp.getMetadata().getAnnotations() != null) {
                     String clusterId = knp.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
                     if (clusterId != null && !clusterId.isEmpty()) {
@@ -1409,9 +1414,13 @@ public class KafkaReconciler {
      */
     protected io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler stretchListenerReconciler() {
         // Create StretchKafkaCluster wrapper
+        // Convert KafkaNodePool CRs to KafkaPool models
         List<KafkaPool> pools = new ArrayList<>();
-        for (int i = 0; i < kafka.pools().size(); i++) {
-            pools.add(kafka.pools().get(i));
+        for (NodeRef node : kafka.nodes()) {
+            KafkaPool pool = kafka.nodePoolForNodeId(node.nodeId());
+            if (pool != null && !pools.contains(pool)) {
+                pools.add(pool);
+            }
         }
         
         io.strimzi.operator.cluster.stretch.StretchKafkaCluster stretchKafkaCluster = 
@@ -1447,14 +1456,17 @@ public class KafkaReconciler {
     private KafkaListenersReconciler.ReconciliationResult convertStretchListenerResult(
             io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler.ListenerReconciliationResult stretchResult) {
         
-        return new KafkaListenersReconciler.ReconciliationResult(
-            stretchResult.advertisedHostnames(),  // Plugin-generated hostnames
-            stretchResult.advertisedPorts(),      // Plugin-generated ports  
-            stretchResult.bootstrapDnsNames(),    // Plugin-generated bootstrap DNS
-            stretchResult.brokerDnsNames(),       // Plugin-generated broker DNS
-            Map.of(),  // bootstrapNodePorts - not used in stretch mode
-            List.of()  // listenerStatuses - will be populated separately
-        );
+        KafkaListenersReconciler.ReconciliationResult result = new KafkaListenersReconciler.ReconciliationResult();
+        
+        // Copy plugin-generated data to result
+        result.advertisedHostnames.putAll(stretchResult.getAdvertisedHostnames());
+        result.advertisedPorts.putAll(stretchResult.getAdvertisedPorts());
+        result.bootstrapDnsNames.addAll(stretchResult.getBootstrapDnsNames().values().stream()
+                .flatMap(Set::stream)
+                .collect(Collectors.toSet()));
+        result.brokerDnsNames.putAll(stretchResult.getBrokerDnsNames());
+        
+        return result;
     }
 
     /**
