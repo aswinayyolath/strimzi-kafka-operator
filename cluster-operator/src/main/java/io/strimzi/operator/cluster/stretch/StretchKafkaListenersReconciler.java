@@ -251,7 +251,9 @@ public final class StretchKafkaListenersReconciler {
 
             // 2. Headless service (for internal communication and MCS)
             // For remote clusters, generate without owner references
-            services.add(kafkaCluster.generateHeadlessService(!isCentral));
+            // Deduplicate ports to avoid conflicts when multiple listeners use the same port
+            Service headlessService = kafkaCluster.generateHeadlessService(!isCentral);
+            services.add(deduplicateServicePorts(headlessService));
 
             // 3. External bootstrap services (for different listener types)
             services.addAll(
@@ -1119,5 +1121,35 @@ public final class StretchKafkaListenersReconciler {
             String hostname,
             int port,
             Set<String> dnsNames) {
+    }
+
+    /**
+     * Deduplicates service ports to avoid Kubernetes validation errors.
+     * When multiple listeners use the same port, only keep one port entry.
+     *
+     * @param service The service to deduplicate
+     * @return Service with deduplicated ports
+     */
+    private Service deduplicateServicePorts(Service service) {
+        if (service == null || service.getSpec() == null || service.getSpec().getPorts() == null) {
+            return service;
+        }
+
+        List<io.fabric8.kubernetes.api.model.ServicePort> originalPorts = service.getSpec().getPorts();
+        Map<Integer, io.fabric8.kubernetes.api.model.ServicePort> uniquePorts = new LinkedHashMap<>();
+
+        for (io.fabric8.kubernetes.api.model.ServicePort port : originalPorts) {
+            Integer portNumber = port.getPort();
+            // Keep the first occurrence of each port number
+            if (!uniquePorts.containsKey(portNumber)) {
+                uniquePorts.put(portNumber, port);
+            }
+        }
+
+        return new io.fabric8.kubernetes.api.model.ServiceBuilder(service)
+                .editSpec()
+                    .withPorts(new ArrayList<>(uniquePorts.values()))
+                .endSpec()
+                .build();
     }
 }
