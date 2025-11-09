@@ -46,7 +46,7 @@ public class StretchClusterStatus implements UnknownPropertyPreserving, Serializ
         this.enabled = enabled;
     }
 
-    @Description("The networking provider used for cross-cluster communication (e.g., 'mcs', 'submariner')")
+    @Description("The networking provider used for cross-cluster communication (e.g., 'mcs', 'nodeport')")
     public String getNetworkingProvider() {
         return networkingProvider;
     }
