@@ -195,6 +195,8 @@ public final class StretchKafkaListenersReconciler {
         this.remoteOperatorSupplier = remoteOperatorSupplierParam;
         this.namespace = kafkaParam.getMetadata().getNamespace();
         this.networkingProvider = networkingProviderParam;
+
+        targetClusterIds.add(centralClusterIdParam);
     }
 
     /**
@@ -253,6 +255,7 @@ public final class StretchKafkaListenersReconciler {
             // For remote clusters, generate without owner references
             // Deduplicate ports to avoid conflicts when multiple listeners use the same port
             Service headlessService = kafkaCluster.generateHeadlessService(!isCentral);
+
             services.add(deduplicateServicePorts(headlessService));
 
             // 3. External bootstrap services (for different listener types)

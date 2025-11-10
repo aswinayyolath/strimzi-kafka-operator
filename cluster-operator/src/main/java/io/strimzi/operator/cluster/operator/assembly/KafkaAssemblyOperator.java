@@ -34,6 +34,8 @@ import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.operator.VertxUtil;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.CrdOperator;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StrimziPodSetOperator;
 import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.Annotations;
@@ -59,6 +61,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -363,6 +366,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         reconcileState.initialStatus()
                 // Preparation steps => prepare cluster descriptions, handle CA creation or changes
                 .compose(state -> state.reconcileCas(clock))
+                .compose(state -> state.reconcileRemoteCas(clock))
                 .compose(state -> state.emitCertificateSecretMetrics())
                 .compose(state -> state.versionChange())
 
@@ -549,6 +553,48 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                         this.clientsCa = cas.clientsCa();
                         return Future.succeededFuture(this);
                     });
+        }
+
+        Future<ReconciliationState> reconcileRemoteCas(Clock clock) {
+            List<Future<Void>> futures = new ArrayList<>();
+            Set<String> remoteClusterIds = config.getRemoteClusters().keySet();
+            for (String targetClusterId : remoteClusterIds) {
+                SecretOperator remoteSecretOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).secretOperations;
+                StrimziPodSetOperator remotePodSetOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).strimziPodSetOperator;
+                PodOperator remotePodOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).podOperations;
+                CaReconciler remoteCaReconciler = new CaReconciler(
+                    reconciliation,
+                    kafkaAssembly,
+                    config,
+                    supplier,
+                    vertx,
+                    certManager,
+                    passwordGenerator
+                );
+
+                remoteCaReconciler.withStretchConfig(
+                    remoteSecretOp,
+                    remotePodSetOp,
+                    remotePodOp,
+                    clusterCa,
+                    clientsCa,
+                    targetClusterId
+                );
+
+                futures.add(
+                    remoteCaReconciler.reconcile(clock)
+                        .compose(result -> {
+                            LOGGER.debugOp("{}: CAs reconciled in remote cluster {}", 
+                                       reconciliation, targetClusterId);
+                            return Future.succeededFuture();
+                        })
+                );
+            }
+
+            return Future.join(futures).map(this);
         }
 
         /**

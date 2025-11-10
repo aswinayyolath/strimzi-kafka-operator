@@ -48,6 +48,7 @@ import io.strimzi.operator.cluster.model.KafkaConfiguration;
 import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.MetricsAndLogging;
+import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.model.PodSetUtils;
 import io.strimzi.operator.cluster.model.RestartReason;
@@ -576,7 +577,7 @@ public class KafkaReconciler {
                 Map<String, Integer> ports = new HashMap<>();
 
                 // Add standard Kafka ports
-                ports.put("tcp-clients", 9092);
+                ports.put("tcp-replication", 9091);
                 ports.put("tcp-ctrlplane", 9090);
 
                 // Add listener ports if configured
@@ -615,28 +616,20 @@ public class KafkaReconciler {
             futures.add(
                 secretOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels().withStrimziComponentType(KafkaCluster.COMPONENT_TYPE))
                     .compose(existingSecrets -> {
-                        List<Secret> desiredCertSecrets = kafka.generateCertificatesSecrets(clusterCa, clientsCa, existingSecrets,
-                                listenerReconciliationResults.bootstrapDnsNames, listenerReconciliationResults.brokerDnsNames,
-                                Util.isMaintenanceTimeWindowsSatisfied(reconciliation, maintenanceWindows, clock.instant()));
-
-                        // Filter secrets for this cluster based on node ownership
-                        List<Secret> clusterSecrets = desiredCertSecrets.stream()
-                            .filter(secret -> {
-                                String secretName = secret.getMetadata().getName();
-                                int nodeId = ReconcilerUtils.getPodIndexFromPodName(secretName);
-                                NodeRef node = kafka.nodes().stream()
-                                    .filter(n -> n.nodeId() == nodeId)
-                                    .findFirst()
-                                    .orElse(null);
-                                
-                                if (node == null) {
-                                    return false;
-                                }
-                                
-                                // Get the cluster ID for this node's pool
-                                String nodeClusterId = getClusterIdForNode(node);
-                                return targetClusterId.equals(nodeClusterId);
-                            })
+                        List<Secret> clusterSecrets = kafka.generateCertificatesSecrets(
+                                clusterCa, 
+                                clientsCa, 
+                                existingSecrets,
+                                listenerReconciliationResults.bootstrapDnsNames, 
+                                listenerReconciliationResults.brokerDnsNames,
+                                Util.isMaintenanceTimeWindowsSatisfied(
+                                    reconciliation, 
+                                    maintenanceWindows, 
+                                    clock.instant()
+                                ), 
+                                targetClusterId
+                            )
+                            .stream()
                             .map(secret -> {
                                 // Remove owner references for remote clusters
                                 if (!isCentral) {
@@ -647,8 +640,7 @@ public class KafkaReconciler {
                                         .build();
                                 }
                                 return secret;
-                            })
-                            .toList();
+                            }).toList();
 
                         // Track secrets to delete for this cluster
                         List<String> desiredSecretNames = clusterSecrets.stream()
@@ -683,51 +675,27 @@ public class KafkaReconciler {
         // Store logging for later use
         this.logging = kafka.logging().loggingConfiguration(reconciliation, metricsAndLogging.loggingCm());
 
+        List<ConfigMap> allConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
+            metricsAndLogging, 
+            listenerReconciliationResults.advertisedHostnames, 
+            listenerReconciliationResults.advertisedPorts, 
+            null
+        );
+
         for (String targetClusterId : clusterIds) {
             ConfigMapOperator configMapOp = selectConfigMapOperator(targetClusterId);
             boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
 
+            List<ConfigMap> clusterConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
+                metricsAndLogging, 
+                listenerReconciliationResults.advertisedHostnames, 
+                listenerReconciliationResults.advertisedPorts, 
+                targetClusterId
+            );
+
             futures.add(
                 configMapOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                     .compose(existingConfigMaps -> {
-                        // Generate all ConfigMaps
-                        List<ConfigMap> allConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
-                            metricsAndLogging, 
-                            listenerReconciliationResults.advertisedHostnames, 
-                            listenerReconciliationResults.advertisedPorts, 
-                            null
-                        );
-
-                        // Filter ConfigMaps for this cluster
-                        List<ConfigMap> clusterConfigMaps = allConfigMaps.stream()
-                            .filter(cm -> {
-                                String cmName = cm.getMetadata().getName();
-                                int nodeId = ReconcilerUtils.getPodIndexFromPodName(cmName);
-                                NodeRef node = kafka.nodes().stream()
-                                    .filter(n -> n.nodeId() == nodeId)
-                                    .findFirst()
-                                    .orElse(null);
-                                
-                                if (node == null) {
-                                    return false;
-                                }
-                                
-                                String nodeClusterId = getClusterIdForNode(node);
-                                return targetClusterId.equals(nodeClusterId);
-                            })
-                            .map(cm -> {
-                                // Remove owner references for remote clusters
-                                if (!isCentral) {
-                                    return new io.fabric8.kubernetes.api.model.ConfigMapBuilder(cm)
-                                        .editMetadata()
-                                            .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
-                                        .endMetadata()
-                                        .build();
-                                }
-                                return cm;
-                            })
-                            .toList();
-
                         List<Future<?>> ops = new ArrayList<>();
 
                         // Delete unwanted ConfigMaps
@@ -802,36 +770,10 @@ public class KafkaReconciler {
             StrimziPodSetOperator podSetOp = selectStrimziPodSetOperator(targetClusterId);
             boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
 
-            // Generate all PodSets
-            List<StrimziPodSet> allPodSets = kafka.generatePodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations, null, null);
-
+          
             // Filter PodSets for this cluster
-            List<StrimziPodSet> clusterPodSets = allPodSets.stream()
-                .filter(podSet -> {
-                    // Check if any pod in this PodSet belongs to this cluster
-                    return podSet.getSpec().getPods().stream()
-                        .anyMatch(podMap -> {
-                            Object metadataObj = podMap.get("metadata");
-                            @SuppressWarnings("unchecked")
-                            Map<String, String> metadata = metadataObj instanceof Map ? (Map<String, String>) metadataObj : null;
-                            String podName = metadata != null ? metadata.get("name") : null;
-                            if (podName == null) {
-                                return false;
-                            }
-                            int nodeId = ReconcilerUtils.getPodIndexFromPodName(podName);
-                            NodeRef node = kafka.nodes().stream()
-                                .filter(n -> n.nodeId() == nodeId)
-                                .findFirst()
-                                .orElse(null);
-                            
-                            if (node == null) {
-                                return false;
-                            }
-                            
-                            String nodeClusterId = getClusterIdForNode(node);
-                            return targetClusterId.equals(nodeClusterId);
-                        });
-                })
+            List<StrimziPodSet> clusterPodSets = kafka.generatePodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations, targetClusterId, stretchCentralClusterId)
+                .stream()
                 .map(podSet -> {
                     // Remove owner references for remote clusters
                     if (!isCentral) {
