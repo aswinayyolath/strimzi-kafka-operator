@@ -390,7 +390,7 @@ public class KafkaClusterCreator {
         String clusterId = NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs);
 
         // Extract target cluster IDs from node pool annotations
-        List<String> targetClusterIds = new ArrayList<>();
+        List<String> remoteClusterIds = new ArrayList<>();
         List<String> clusterIds = new ArrayList<>();
         clusterIds.add(centralClusterId);
 
@@ -401,7 +401,7 @@ public class KafkaClusterCreator {
                 if (alias != null && !alias.isEmpty() && !clusterIds.contains(alias)) {
                     clusterIds.add(alias);
                     if (!alias.equals(centralClusterId)) {
-                        targetClusterIds.add(alias);
+                        remoteClusterIds.add(alias);
                     }
                 }
             }
@@ -416,7 +416,7 @@ public class KafkaClusterCreator {
             clusterId,
             sharedEnvironmentProvider,
             centralClusterId,
-            targetClusterIds,
+            remoteClusterIds,
             clusterIds
         );
     }

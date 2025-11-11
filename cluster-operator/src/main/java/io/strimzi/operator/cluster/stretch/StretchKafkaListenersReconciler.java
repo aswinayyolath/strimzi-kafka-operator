@@ -70,8 +70,6 @@ public final class StretchKafkaListenersReconciler {
     private final Kafka kafka;
     /** Kafka cluster model. */
     private final KafkaCluster kafkaCluster;
-    /** Kafka cluster model. */
-    private final StretchKafkaCluster stretchKafkaCluster;
     /** List of KafkaNodePool CRs. */
     private final List<KafkaNodePool> nodePools;
     /** Set of target cluster IDs. */
@@ -165,7 +163,6 @@ public final class StretchKafkaListenersReconciler {
      * @param reconciliationParam Reconciliation context
      * @param kafkaParam Kafka custom resource
      * @param kafkaClusterParam Kafka cluster model
-     * @param stretchKafkaClusterParam Stretch Kafka cluster model
      * @param nodePoolsParam List of KafkaNodePool CRs
      * @param targetClusterIdsParam Target cluster IDs
      * @param centralClusterIdParam Central cluster ID
@@ -177,7 +174,6 @@ public final class StretchKafkaListenersReconciler {
             final Reconciliation reconciliationParam,
             final Kafka kafkaParam,
             final KafkaCluster kafkaClusterParam,
-            final StretchKafkaCluster stretchKafkaClusterParam,
             final List<KafkaNodePool> nodePoolsParam,
             final Set<String> targetClusterIdsParam,
             final String centralClusterIdParam,
@@ -187,7 +183,6 @@ public final class StretchKafkaListenersReconciler {
         this.reconciliation = reconciliationParam;
         this.kafka = kafkaParam;
         this.kafkaCluster = kafkaClusterParam;
-        this.stretchKafkaCluster = stretchKafkaClusterParam;
         this.nodePools = nodePoolsParam;
         this.targetClusterIds = targetClusterIdsParam;
         this.centralClusterId = centralClusterIdParam;
@@ -253,10 +248,9 @@ public final class StretchKafkaListenersReconciler {
 
             // 2. Headless service (for internal communication and MCS)
             // For remote clusters, generate without owner references
-            // Deduplicate ports to avoid conflicts when multiple listeners use the same port
             Service headlessService = kafkaCluster.generateHeadlessService(!isCentral);
 
-            services.add(deduplicateServicePorts(headlessService));
+            services.add(headlessService);
 
             // 3. External bootstrap services (for different listener types)
             services.addAll(
@@ -265,7 +259,7 @@ public final class StretchKafkaListenersReconciler {
             // 4. Per-broker services (for route, cluster-ip,
             // loadbalancer, nodeport listeners)
             Map<String, List<Service>> clusteredPerBrokerServices =
-                    stretchKafkaCluster.generateClusteredPerPodServices();
+                kafkaCluster.generateClusteredPerPodServices();
             List<Service> perBrokerServices =
                     clusteredPerBrokerServices.getOrDefault(clusterId,
                             Collections.emptyList());
@@ -357,7 +351,7 @@ public final class StretchKafkaListenersReconciler {
 
             // Get per-broker routes for this cluster
             Map<String, List<Route>>
-                    clusteredRoutes = stretchKafkaCluster.generateClusteredExternalRoutes();
+                    clusteredRoutes = kafkaCluster.generateClusteredExternalRoutes();
             List<Route> perBrokerRoutes = clusteredRoutes.getOrDefault(clusterId, Collections.emptyList());
             routes.addAll(perBrokerRoutes);
 
@@ -428,7 +422,7 @@ public final class StretchKafkaListenersReconciler {
 
             // Get per-broker ingresses for this cluster
             Map<String, List<Ingress>>
-                    clusteredIngresses = stretchKafkaCluster.generateClusteredExternalIngresses();
+                    clusteredIngresses = kafkaCluster.generateClusteredExternalIngresses();
             List<Ingress> perBrokerIngresses = clusteredIngresses.getOrDefault(clusterId, Collections.emptyList());
             ingresses.addAll(perBrokerIngresses);
 
@@ -1126,33 +1120,4 @@ public final class StretchKafkaListenersReconciler {
             Set<String> dnsNames) {
     }
 
-    /**
-     * Deduplicates service ports to avoid Kubernetes validation errors.
-     * When multiple listeners use the same port, only keep one port entry.
-     *
-     * @param service The service to deduplicate
-     * @return Service with deduplicated ports
-     */
-    private Service deduplicateServicePorts(Service service) {
-        if (service == null || service.getSpec() == null || service.getSpec().getPorts() == null) {
-            return service;
-        }
-
-        List<io.fabric8.kubernetes.api.model.ServicePort> originalPorts = service.getSpec().getPorts();
-        Map<Integer, io.fabric8.kubernetes.api.model.ServicePort> uniquePorts = new LinkedHashMap<>();
-
-        for (io.fabric8.kubernetes.api.model.ServicePort port : originalPorts) {
-            Integer portNumber = port.getPort();
-            // Keep the first occurrence of each port number
-            if (!uniquePorts.containsKey(portNumber)) {
-                uniquePorts.put(portNumber, port);
-            }
-        }
-
-        return new io.fabric8.kubernetes.api.model.ServiceBuilder(service)
-                .editSpec()
-                    .withPorts(new ArrayList<>(uniquePorts.values()))
-                .endSpec()
-                .build();
-    }
 }

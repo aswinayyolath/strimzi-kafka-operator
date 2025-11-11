@@ -222,7 +222,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     // Stretch Mode Configuration
     private boolean isStretchMode;
     private String centralClusterId;
-    private List<String> targetClusterIds;
+    private List<String> remoteClusterIds;
     private List<String> clusterIds;
     private StretchNetworkingProvider stretchNetworkingProvider;
 
@@ -280,7 +280,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @param clusterId                     Kafka cluster Id (or null if it is not known yet)
      * @param sharedEnvironmentProvider     Shared environment provider
      * @param centralClusterId              Cluster Id of the central cluster
-     * @param targetClusterIds              List of target cluster IDs defined in kafka node pools
+     * @param remoteClusterIds              List of target cluster IDs defined in kafka node pools
      * @param clusterIds                    List of cluster ids defined in REMOTE_KUBE_CLUSTERS env + CENTRAL_CLUSTER_ID env
      *
      * @return Kafka cluster instance
@@ -293,7 +293,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                        String clusterId,
                                        SharedEnvironmentProvider sharedEnvironmentProvider,
                                        String centralClusterId,
-                                       List<String> targetClusterIds,
+                                       List<String> remoteClusterIds,
                                        List<String> clusterIds) {
 
         KafkaCluster result = fromCrd(
@@ -308,7 +308,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
         result.isStretchMode = true;
         result.centralClusterId = centralClusterId;
-        result.targetClusterIds = targetClusterIds;
+        result.remoteClusterIds = remoteClusterIds;
         result.clusterIds = clusterIds;
         // Note: stretchNetworkingProvider should be set by caller if needed
 
@@ -2282,4 +2282,170 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
             super(message);
         }
     }
+
+
+    /**
+     * Generates list of references to Kafka nodes for this Kafka cluster, in the specified kube cluster.
+     * The references contain both the pod name and the ID of the Kafka node.
+     * @param targetClusterId   The cluster Id of the kube cluster where the nodes are deployed
+     *
+     * @return  Set of Kafka node references
+     */
+    public Set<NodeRef> nodesAtCluster(String targetClusterId) {
+        Set<NodeRef> nodes = new LinkedHashSet<>();
+        List<KafkaPool> pools = nodePools.stream()
+                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
+                                        .toList();
+
+        for (KafkaPool pool : nodePools) {
+            nodes.addAll(pool.nodes());
+        }
+
+        return nodes;
+    }
+
+    
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod services.
+     *
+     * @return The Map targetCluster and their generated Services
+     */
+    public Map<String, List<Service>> generateClusteredPerPodServices() {
+        Map<String, List<Service>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generatePerPodServices(targetClusterId));
+        }
+
+        return result;
+    }
+
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod external Ingresses
+     *
+     * @return The Map targetCluster and their generated Ingresses
+     */
+    public Map<String, List<Ingress>> generateClusteredExternalIngresses() {
+        Map<String, List<Ingress>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generateExternalIngresses(targetClusterId));
+        }
+
+        return result;
+    }
+
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod external Routes
+     *
+     * @return The Map of targetClusters and their generated Routes
+     */
+    public Map<String, List<Route>> generateClusteredExternalRoutes() {
+        Map<String, List<Route>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generateExternalRoutes(targetClusterId));
+        }
+
+        return result;
+    }
+
+
+    /**
+     * Generates a clustered StrimziPodSet for the stretched kafka cluster
+     *
+     * @param isOpenShift            Flags whether we are on OpenShift or not
+     * @param imagePullPolicy        Image pull policy which will be used by the pods
+     * @param imagePullSecrets       List of image pull secrets
+     * @param podAnnotationsProvider Function which provides annotations for given pod based on its broker ID. The
+     *                               annotations for each pod are different due to the individual configurations.
+     *                               So they need to be dynamically generated though this function instead of just
+     *                               passed as Map.
+     * @param centralClusterId       Stretch Cluster Central Cluster ID
+     *
+     * @return List of generated StrimziPodSets with Kafka pods
+     */
+    public Map<String, List<StrimziPodSet>> generateClusteredPodSets(boolean isOpenShift,
+        ImagePullPolicy imagePullPolicy,
+        List<LocalObjectReference> imagePullSecrets,
+        Function<NodeRef, Map<String, String>> podAnnotationsProvider,
+        String centralClusterId) {
+
+        Map<String, List<StrimziPodSet>> podSets = new HashMap<>();
+
+        for (String targetCluster : clusterIds) {
+            podSets
+                .computeIfAbsent(targetCluster, k -> new ArrayList<>())
+                .addAll(
+                    generatePodSets(
+                        isOpenShift,
+                        imagePullPolicy,
+                        imagePullSecrets,
+                        podAnnotationsProvider,
+                        targetCluster,
+                        centralClusterId
+                    )
+                );
+        }
+
+        return podSets;
+    }
+
+    /**
+     * Generates list of Kafka node IDs that are going to be added to the Kafka cluster in a streched cluster as brokers.
+     * This reports all broker nodes on cluster creation as well as the newly added ones on scaling up.
+     * @param targetClusterId  The stretch cluster ID where the nodes are going to be created
+     *
+     * 
+     * @return  Set of Kafka node IDs which are going to be added as brokers.
+     */
+    public Set<NodeRef> addedNodesAtCluster(String targetClusterId) {
+        Set<NodeRef> nodes = new LinkedHashSet<>();
+        List<KafkaPool> pools = nodePools.stream()
+                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
+                                        .toList();
+        for (KafkaPool pool : pools) {
+            nodes.addAll(pool.scaleUpNodes());
+        }
+
+        return nodes;
+    }
+
+    /**
+     * @return  Returns the central cluster Id of a stretched kafka cluster
+     */
+    public String getCentralClusterId() {
+        return centralClusterId;
+    }
+
+
+
+
+    /**
+     * @return  Returns target cluster Ids defined in KafkaNodePools of a kafka cluster
+     */
+    public List<String> getTargetClusterIds() {
+        return remoteClusterIds;
+    }
+
+
+    /**
+     * @return  Returns the stretch networking provider (can be null for non-stretch clusters)
+     */
+    public StretchNetworkingProvider getStretchNetworkingProvider() {
+        return stretchNetworkingProvider;
+    }
+
+        /**
+     * Returns the list of KafkaNodePools for this KafkaCluster.
+     *
+     * @return List of KafkaNodePools
+     */
+    public List<KafkaPool> getNodePools() {
+        return nodePools;
+    }
+
 }
