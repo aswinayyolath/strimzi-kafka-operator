@@ -334,7 +334,6 @@ public class KafkaReconciler {
         this.networkingProvider = networkingProvider;
         this.isStretchMode = true;
         this.stretchCentralClusterId = centralClusterId;
-
     }
 
         /**
@@ -483,21 +482,16 @@ public class KafkaReconciler {
      * @return Future which completes when owner references are updated
      */
     protected Future<Void> stretchUpdateOwnerReferences() {
-        if (!isStretchMode) {
-            return Future.succeededFuture();
-        }
-
         List<Future<Void>> futures = new ArrayList<>();
         String namespace = reconciliation.namespace();
 
         // Update owner references for each remote cluster
-        for (String clusterId : clusterIds) {
-            if (clusterId.equals(stretchCentralClusterId)) {
-                continue; // Skip central cluster - resources already have Kafka CR as owner
-            }
-
+        for (String clusterId : remoteClusterIds) {
             // Get the StrimziPodSet name for this cluster
             String podSetName = getPodSetNameForCluster(clusterId);
+            ConfigMapOperator cmOp = selectConfigMapOperator(clusterId);
+            SecretOperator secretOp = selectSecretOperator(clusterId);
+
             if (podSetName == null) {
                 LOGGER.warnCr(reconciliation, "No StrimziPodSet found for cluster {}, skipping owner reference update", clusterId);
                 continue;
@@ -511,10 +505,52 @@ public class KafkaReconciler {
                 podSetName,
                 clusterId,
                 "ServiceAccount"
-            ));
+            )
+            .compose(i -> {
+                LOGGER.infoOp("Updating ConfigMaps at {} with owner reference {}", clusterId, podSetName);
+                List<Future<?>> configMapFutures = new ArrayList<>();
+                cmOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                            .compose(configmaps -> {
+                                for (ConfigMap cm : configmaps) {
+                                    LOGGER.infoOp("Updating ConfigMaps {}", cm.getMetadata().getName());
+                                    configMapFutures.add(updateResourceOwner(
+                                        cmOp,
+                                        namespace,
+                                        cm.getMetadata().getName(),
+                                        podSetName,
+                                        clusterId,
+                                        "ConfigMap"
+                                    ));
+                                }
+                                return Future.succeededFuture().mapEmpty();
+                            });
+                return Future.join(configMapFutures).mapEmpty();
+            })
+            .compose(i -> {
+                List<Future<?>> secretFutures = new ArrayList<>();
+                LOGGER.infoOp("Updating Secrets at {} with owner reference {}", clusterId, podSetName);
+                secretOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels().withStrimziComponentType(KafkaCluster.COMPONENT_TYPE))
+                .compose(secrets -> {
+                    for (Secret secret : secrets) {
+                        LOGGER.infoOp("Updating Secret {}", secret.getMetadata().getName());
 
-            // Note: Secrets and ConfigMaps will be updated when they are reconciled
-            // The owner reference will be set during their creation/update in the reconciliation pipeline
+                        secretFutures.add(updateResourceOwner(
+                            secretOp,
+                            namespace,
+                            secret.getMetadata().getName(),
+                            podSetName,
+                            clusterId,
+                            "Secret"
+                        ));
+                    }
+                    return Future.succeededFuture().mapEmpty();
+
+
+                });
+
+                return Future.join(secretFutures).mapEmpty();
+
+            }));
         }
 
         return Future.join(futures).mapEmpty();
@@ -528,7 +564,7 @@ public class KafkaReconciler {
             if (pool.getMetadata().getAnnotations() != null) {
                 String alias = pool.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
                 if (clusterId.equals(alias)) {
-                    return pool.getMetadata().getName();
+                    return kafkaCr.getMetadata().getName() + '-' + pool.getMetadata().getName();
                 }
             }
         }
@@ -565,6 +601,8 @@ public class KafkaReconciler {
                     }
                 }
 
+                LOGGER.infoOp("{} {} {} {} {}", namespace, resourceName, podSetName, clusterId, resourceType);
+
                 // Get the StrimziPodSet to get its UID
                 StrimziPodSetOperator podSetOp = selectStrimziPodSetOperator(clusterId);
                 return podSetOp.getAsync(namespace, podSetName)
@@ -574,6 +612,9 @@ public class KafkaReconciler {
                                 podSetName, clusterId, resourceType, resourceName);
                             return Future.succeededFuture();
                         }
+
+                        LOGGER.infoOp("Podset = {}", podSet.getMetadata().getName());
+
 
                         // Create StrimziPodSet owner reference
                         OwnerReference podSetOwner = new OwnerReferenceBuilder()
@@ -596,7 +637,13 @@ public class KafkaReconciler {
                         newOwners.add(podSetOwner);
                         resource.getMetadata().setOwnerReferences(newOwners);
 
+                        LOGGER.infoOp("New resource with owner reference = {}", resource);
+
+
                         LOGGER.debugCr(reconciliation, "Setting StrimziPodSet {} as owner for {} {} in cluster {}",
+                            podSetName, resourceType, resourceName, clusterId);
+
+                        LOGGER.infoOp("Setting StrimziPodSet {} as owner for {} {} in cluster {}",
                             podSetName, resourceType, resourceName, clusterId);
 
                         return operator.reconcile(reconciliation, namespace, resourceName, resource)
@@ -799,6 +846,7 @@ public class KafkaReconciler {
                             }
 
                             this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
+
                             ops.add(configMapOp.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
                         }
 
@@ -834,7 +882,6 @@ public class KafkaReconciler {
 
         for (String targetCluster : targetedPodSets.keySet()) {
             boolean isCentralCluster = targetCluster.equals(stretchCentralClusterId);
-            LOGGER.infoOp("Targeted podsets = {}", targetedPodSets);
             StrimziPodSetOperator spsOp = selectStrimziPodSetOperator(targetCluster);
 
             futures.add(
@@ -942,41 +989,41 @@ public class KafkaReconciler {
         }
         
         return modelWarnings(kafkaStatus)
-        .compose(i -> initClientAuthenticationCertificates())
-        .compose(i -> manualPodCleaning())
-        .compose(i -> networkPolicy())
-        .compose(i -> updateKafkaAutoRebalanceStatus(kafkaStatus))
-        .compose(i -> stretchManualRollingUpdate())
-        .compose(i -> stretchPvcs(kafkaStatus))
-        .compose(i -> stretchServiceAccount())
-        .compose(i -> stretchInitClusterRoleBinding())
-        .compose(i -> stretchScaleDown())
-        .compose(i -> updateNodePoolStatuses(kafkaStatus))
-        .compose(i -> stretchListeners())
-        .compose(i -> stretchNetworkingResources()) // Networking resources for stretch clusters
-        .compose(i -> stretchCertificateSecrets(clock))
-        .compose(i -> stretchBrokerConfigurationConfigMaps())
-        .compose(i -> jmxSecret())
-        .compose(i -> podDisruptionBudget())
-        .compose(i -> stretchPodSet())
-        .compose(podSetDiffs -> stretchRollingUpdate(podSetDiffs)) 
-        // We pass the PodSet reconciliation result this way to avoid storing it in the instance
-        .compose(i -> stretchUpdateOwnerReferences()) // Update owner references for remote cluster resources
-        .compose(i -> stretchPodsReady())
-        .compose(i -> serviceEndpointsReady())
-        .compose(i -> headlessServiceEndpointsReady())
-        .compose(i -> clusterId(kafkaStatus))
-        .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
-        .compose(i -> defaultKafkaQuotas())
-        .compose(i -> nodeUnregistration(kafkaStatus))
-        .compose(i -> metadataVersion(kafkaStatus))
-        .compose(i -> stretchDeletePersistentClaims())
-        .compose(i -> sharedKafkaConfigurationCleanup())
-        .compose(i -> stretchDeleteOldCertificateSecrets())
-        // This has to run after all possible rolling updates which might move the pods to different nodes
-        .compose(i -> nodePortExternalListenerStatus())
-        .compose(i -> updateKafkaStatus(kafkaStatus));
-    }
+            .compose(i -> initClientAuthenticationCertificates())
+            .compose(i -> manualPodCleaning())
+            .compose(i -> networkPolicy())
+            .compose(i -> updateKafkaAutoRebalanceStatus(kafkaStatus))
+            .compose(i -> stretchManualRollingUpdate())
+            .compose(i -> stretchPvcs(kafkaStatus))
+            .compose(i -> stretchServiceAccount())
+            .compose(i -> stretchInitClusterRoleBinding())
+            .compose(i -> stretchScaleDown())
+            .compose(i -> updateNodePoolStatuses(kafkaStatus))
+            .compose(i -> stretchListeners())
+            .compose(i -> stretchNetworkingResources()) // Networking resources for stretch clusters
+            .compose(i -> stretchCertificateSecrets(clock))
+            .compose(i -> stretchBrokerConfigurationConfigMaps())
+            .compose(i -> jmxSecret())
+            .compose(i -> podDisruptionBudget())
+            .compose(i -> stretchPodSet())
+            .compose(podSetDiffs -> stretchRollingUpdate(podSetDiffs)) 
+            // We pass the PodSet reconciliation result this way to avoid storing it in the instance
+            .compose(i -> stretchUpdateOwnerReferences()) // Update owner references for remote cluster resources
+            .compose(i -> stretchPodsReady())
+            .compose(i -> serviceEndpointsReady())
+            .compose(i -> headlessServiceEndpointsReady())
+            .compose(i -> clusterId(kafkaStatus))
+            // .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
+            .compose(i -> defaultKafkaQuotas())
+            .compose(i -> nodeUnregistration(kafkaStatus))
+            .compose(i -> metadataVersion(kafkaStatus))
+            .compose(i -> stretchDeletePersistentClaims())
+            .compose(i -> sharedKafkaConfigurationCleanup())
+            .compose(i -> stretchDeleteOldCertificateSecrets())
+            // This has to run after all possible rolling updates which might move the pods to different nodes
+            .compose(i -> nodePortExternalListenerStatus())
+            .compose(i -> updateKafkaStatus(kafkaStatus));
+        }
     
     /**
      * Updates the stretch cluster status in the Kafka CR status.
@@ -1963,8 +2010,6 @@ public class KafkaReconciler {
     private Future<Void> waitForNewStretchedNodes(String targetCluster) {
         boolean isCentralCluster = targetCluster.equals(stretchCentralClusterId);
         PodOperator podOp = isCentralCluster ? podOperator : stretchPodOperators.get(targetCluster);
-        LOGGER.infoOp("Waiting for new stretched nodes at {}", targetCluster);
-        LOGGER.infoOp("Nodes are {}", kafka.addedNodesAtCluster(targetCluster).stream().map(NodeRef::podName).toList());
 
         return ReconcilerUtils
                 .podsReady(
@@ -2143,6 +2188,7 @@ public class KafkaReconciler {
      * @return  Future which completes when the endpoints are ready
      */
     protected Future<Void> headlessServiceEndpointsReady() {
+
         return serviceOperator.endpointReadiness(reconciliation, reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), 1_000, operationTimeoutMs);
     }
 
