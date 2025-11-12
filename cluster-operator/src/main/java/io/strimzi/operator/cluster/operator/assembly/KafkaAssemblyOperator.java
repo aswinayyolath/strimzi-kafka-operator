@@ -364,6 +364,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         }
 
         reconcileState.initialStatus()
+                // Validate stretch cluster configuration before creating any resources
+                .compose(state -> state.validateStretchConfiguration())
                 // Preparation steps => prepare cluster descriptions, handle CA creation or changes
                 .compose(state -> state.reconcileCas(clock))
                 .compose(state -> state.reconcileRemoteCas(clock))
@@ -534,6 +536,46 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          */
         CaReconciler caReconciler()   {
             return new CaReconciler(reconciliation, kafkaAssembly, config, supplier, vertx, certManager, passwordGenerator);
+        }
+
+        /**
+         * Validates stretch cluster configuration before creating any resources.
+         * This prevents CA secrets and other resources from being created when configuration is invalid.
+         *
+         * @return Future with Reconciliation State, or failed future if validation fails
+         */
+        Future<ReconciliationState> validateStretchConfiguration() {
+            // Only validate if stretch cluster mode is enabled
+            if (!isStretchClusterWithPluggableProvider(kafkaAssembly)) {
+                return Future.succeededFuture(this);
+            }
+
+            // Get node pools for validation
+            return nodePoolOperator.listAsync(namespace, Labels.forStrimziCluster(name))
+                .compose(nodePools -> {
+                    // Create validator
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator validator = 
+                        new io.strimzi.operator.cluster.stretch.StretchClusterValidator(
+                            vertx,
+                            config.getCentralClusterId(),
+                            config.getRemoteClusters().keySet()
+                        );
+
+                    // Validate configuration
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result = 
+                        validator.validateKafkaConfiguration(kafkaAssembly, nodePools, true);
+
+                    if (!result.isValid()) {
+                        // Don't update status here - let the normal reconciliation error handling do it
+                        // This prevents the reconciliation loop caused by repeated status updates
+                        // Rohan to check if this is the right way to handle this
+                        return Future.failedFuture(
+                            new InvalidConfigurationException(result.getErrorMessage())
+                        );
+                    }
+
+                    return Future.succeededFuture(this);
+                });
         }
 
         /**

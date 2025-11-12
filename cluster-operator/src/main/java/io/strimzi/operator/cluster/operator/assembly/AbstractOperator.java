@@ -285,7 +285,8 @@ public abstract class AbstractOperator<
                 // For user configuration errors, log only the message (no stack trace)
                 Throwable cause = e.getCause();
                 if (cause instanceof io.strimzi.operator.common.model.InvalidResourceException
-                        || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                        || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException
+                        || cause instanceof io.strimzi.operator.common.InvalidConfigurationException) {
                     LOGGER.errorCr(reconciliation, "createOrUpdate failed: {}", cause.getMessage());
                 } else {
                     LOGGER.errorCr(reconciliation, "createOrUpdate failed", cause);
@@ -294,7 +295,8 @@ public abstract class AbstractOperator<
             } else {
                 // For user configuration errors, log only the message (no stack trace)
                 if (res.cause() instanceof io.strimzi.operator.common.model.InvalidResourceException
-                        || res.cause() instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                        || res.cause() instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException
+                        || res.cause() instanceof io.strimzi.operator.common.InvalidConfigurationException) {
                     LOGGER.errorCr(reconciliation, "createOrUpdate failed: {}", res.cause().getMessage());
                 } else {
                     LOGGER.errorCr(reconciliation, "createOrUpdate failed", res.cause());
@@ -579,7 +581,8 @@ public abstract class AbstractOperator<
 
                     // For user configuration errors, log only the message (no stack trace)
                     if (cause instanceof io.strimzi.operator.common.model.InvalidResourceException
-                            || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException) {
+                            || cause instanceof io.strimzi.operator.cluster.model.KafkaUpgradeException
+                            || cause instanceof io.strimzi.operator.common.InvalidConfigurationException) {
                         LOGGER.warnCr(reconciliation, "Failed to reconcile: {}", cause.getMessage());
                     } else {
                         LOGGER.warnCr(reconciliation, "Failed to reconcile", cause);

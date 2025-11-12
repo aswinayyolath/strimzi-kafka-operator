@@ -96,6 +96,7 @@ import org.apache.kafka.common.KafkaException;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -396,13 +397,17 @@ public class KafkaReconciler {
      * Helper method to select the appropriate StrimziPodSetOperator for a cluster.
      *
      * @param clusterId The cluster ID
-     * @return StrimziPodSetOperator for the cluster
+     * @return StrimziPodSetOperator for the cluster, or null if cluster ID is invalid
      */
     private StrimziPodSetOperator selectStrimziPodSetOperator(String clusterId) {
         if (clusterId.equals(stretchCentralClusterId)) {
             return strimziPodSetOperator;
         }
-        return stretchStrimziPodsetOperators.get(clusterId);
+        StrimziPodSetOperator operator = stretchStrimziPodsetOperators.get(clusterId);
+        if (operator == null) {
+            LOGGER.warnCr(reconciliation, "Invalid cluster ID: {}. This cluster ID is not configured in STRIMZI_REMOTE_KUBE_CONFIG", clusterId);
+        }
+        return operator;
     }
 
     /**
@@ -1239,8 +1244,14 @@ public class KafkaReconciler {
      * @return  List with node references to nodes which should be rolled
      */
     private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation(String targetClusterId)   {
-        return  (targetClusterId != null ? selectStrimziPodSetOperator(targetClusterId) : strimziPodSetOperator)
-                .listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+        StrimziPodSetOperator operator = targetClusterId != null ? selectStrimziPodSetOperator(targetClusterId) : strimziPodSetOperator;
+        
+        if (operator == null) {
+            LOGGER.warnCr(reconciliation, "Cannot list PodSets for cluster {} - operator is null (invalid cluster ID)", targetClusterId);
+            return Future.succeededFuture(Collections.emptyList());
+        }
+        
+        return operator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .map(podSets -> {
                     List<NodeRef> nodes = new ArrayList<>();
 
