@@ -82,6 +82,7 @@ import io.strimzi.operator.cluster.model.metrics.StrimziMetricsReporterModel;
 import io.strimzi.operator.cluster.model.metrics.SupportsMetrics;
 import io.strimzi.operator.cluster.model.securityprofiles.ContainerSecurityProviderContextImpl;
 import io.strimzi.operator.cluster.model.securityprofiles.PodSecurityProviderContextImpl;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.Util;
@@ -100,6 +101,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -232,6 +234,13 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     private QuotasPlugin quotas;
     /* test */ KafkaConfiguration configuration;
 
+    // Stretch Mode Configuration
+    private boolean isStretchMode;
+    private String centralClusterId;
+    private List<String> remoteClusterIds;
+    private List<String> clusterIds;
+    private StretchNetworkingProvider stretchNetworkingProvider;
+
     /**
      * Warning conditions generated from the Custom Resource
      */
@@ -272,6 +281,53 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         super(reconciliation, resource, KafkaResources.kafkaComponentName(resource.getMetadata().getName()), COMPONENT_TYPE, sharedEnvironmentProvider);
 
         this.initImage = System.getenv().getOrDefault(ClusterOperatorConfig.STRIMZI_DEFAULT_KAFKA_INIT_IMAGE, "quay.io/strimzi/operator:latest");
+    }
+
+    /**
+     * Creates the Stretched Kafka cluster model instance from a Kafka CR
+     *
+     * @param reconciliation                Reconciliation marker
+     * @param kafka                         Kafka custom resource
+     * @param pools                         Set of node pools used by this cluster
+     * @param versions                      Supported Kafka versions
+     * @param versionChange                 KafkaVersionChange instance describing how the Kafka versions (and the
+     *                                      various protocol and metadata versions) to be used in this reconciliation
+     * @param clusterId                     Kafka cluster Id (or null if it is not known yet)
+     * @param sharedEnvironmentProvider     Shared environment provider
+     * @param centralClusterId              Cluster Id of the central cluster
+     * @param remoteClusterIds              List of target cluster IDs defined in kafka node pools
+     * @param clusterIds                    List of cluster ids defined in REMOTE_KUBE_CLUSTERS env + CENTRAL_CLUSTER_ID env
+     *
+     * @return Kafka cluster instance
+     */
+    public static KafkaCluster forStretchFromCrd(Reconciliation reconciliation,
+                                       Kafka kafka,
+                                       List<KafkaPool> pools,
+                                       KafkaVersion.Lookup versions,
+                                       KafkaVersionChange versionChange,
+                                       String clusterId,
+                                       SharedEnvironmentProvider sharedEnvironmentProvider,
+                                       String centralClusterId,
+                                       List<String> remoteClusterIds,
+                                       List<String> clusterIds) {
+
+        KafkaCluster result = fromCrd(
+                                        reconciliation,
+                                        kafka,
+                                        pools,
+                                        versions,
+                                        versionChange,
+                                        clusterId,
+                                        sharedEnvironmentProvider
+                                    );
+
+        result.isStretchMode = true;
+        result.centralClusterId = centralClusterId;
+        result.remoteClusterIds = remoteClusterIds;
+        result.clusterIds = clusterIds;
+        // Note: stretchNetworkingProvider should be set by caller if needed
+
+        return result;
     }
 
     /**
@@ -676,11 +732,21 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The generated Service
      */
     public Service generateService() {
+        return generateService(false);
+    }
+
+    /**
+     * Generates a Service according to configured defaults
+     * @param isRemoteResource     Indicates if the service is a Remote Service
+     *
+     * @return The generated Service
+     */
+    public Service generateService(boolean isRemoteResource) {
         return ServiceUtils.createDiscoverableClusterIpService(
                 KafkaResources.bootstrapServiceName(cluster),
                 namespace,
                 labels,
-                ownerReference,
+                (isRemoteResource ? null : ownerReference),
                 templateService,
                 getServicePorts(),
                 brokersSelector(),
@@ -722,6 +788,17 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The list with generated Services
      */
     public List<Service> generateExternalBootstrapServices() {
+        return generateExternalBootstrapServices(false);
+    }
+
+    /**
+     * Generates list of external bootstrap services. These services are used for exposing it externally.
+     * Separate services are used to make sure that we do expose the right port in the right way.
+     * @param isRemoteResource     Indicates if the service is to be deployed on a remote cluster
+     *
+     * @return The list with generated Services
+     */
+    public List<Service> generateExternalBootstrapServices(boolean isRemoteResource) {
         List<GenericKafkaListener> externalListeners = ListenersUtils.listenersWithOwnServices(listeners);
         List<Service> services = new ArrayList<>(externalListeners.size());
 
@@ -744,7 +821,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                     serviceName,
                     namespace,
                     labels,
-                    ownerReference,
+                    (isRemoteResource ? null : ownerReference),
                     templateExternalBootstrapService,
                     ports,
                     brokersSelector(),
@@ -809,15 +886,47 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
     /**
      * Generates list of per-pod service.
+     * If target Cluster is given, the services for that target cluster only will
+     * be returned.
      *
      * @return The list with generated Services
      */
     public List<Service> generatePerPodServices() {
+        return generatePerPodServices(null);
+    }
+
+    /**
+     * Checks if the given cluster ID represents a remote cluster, i.e., it exists and is not equal to the central cluster ID.
+     * @param targetClusterId   The target cluster ID to compare against the central cluster ID.
+     *
+     * @return                  true if the targetClusterId is non-null, non-empty, and different from the centralClusterId.
+     */
+    public boolean isRemoteClusterId(String targetClusterId) {
+        return Optional.ofNullable(targetClusterId)
+                    .filter(id -> !id.isEmpty() && !id.equals(centralClusterId))
+                    .isPresent();
+    }
+
+    /**
+     * Generates list of per-pod service.
+     * If target Cluster is given, the services for that target cluster only will
+     * be returned.
+     *
+     * @param targetCluster     The target cluster for which the services are to be generated
+     *
+     * @return The list with generated Services
+     */
+    @SuppressWarnings("CyclomaticComplexity")
+    public List<Service> generatePerPodServices(String targetCluster) {
         List<GenericKafkaListener> externalListeners = ListenersUtils.listenersWithOwnServices(listeners);
         List<Service> services = new ArrayList<>();
 
         for (GenericKafkaListener listener : externalListeners)   {
             for (KafkaPool pool : nodePools)    {
+
+                if (ModelUtils.clusterIdExistsButNotEquals(targetCluster, pool.getTargetCluster()))
+                    continue;
+
                 if (pool.isBroker()) {
                     for (NodeRef node : pool.nodes()) {
                         String serviceName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(pool.componentName, node.nodeId(), listener);
@@ -835,7 +944,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                 serviceName,
                                 namespace,
                                 pool.labels,
-                                pool.ownerReference,
+                                (isRemoteClusterId(targetCluster)) ? null : pool.ownerReference,
                                 pool.templatePerBrokerService,
                                 ports,
                                 pool.labels.strimziSelectorLabels().withStrimziPodName(node.podName()),
@@ -907,6 +1016,15 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The list of generated Routes
      */
     public List<Route> generateExternalBootstrapRoutes() {
+        return generateExternalBootstrapRoutes(false);
+    }
+    /**
+     * Generates a list of bootstrap route which can be used to bootstrap clients outside of OpenShift.
+     * @param isRemoteResource  Indicates if this Route is to be deployed in a remote cluster
+     *
+     * @return The list of generated Routes
+     */
+    public List<Route> generateExternalBootstrapRoutes(boolean isRemoteResource) {
         List<GenericKafkaListener> routeListeners = ListenersUtils.routeListeners(listeners);
         List<Route> routes = new ArrayList<>(routeListeners.size());
 
@@ -941,6 +1059,10 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 route.getSpec().setHost(host);
             }
 
+            if (isRemoteResource) {
+                route.getMetadata().setOwnerReferences(Collections.emptyList());
+            }
+
             routes.add(route);
         }
 
@@ -953,6 +1075,16 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The list with generated Routes
      */
     public List<Route> generateExternalRoutes() {
+        return generateExternalRoutes(null);
+    }
+
+    /**
+     * Generates list of per-pod routes. These routes are used for exposing it externally using OpenShift Routes.
+     * @param targetCluster     Target cluster for which the routes will be generated
+     *
+     * @return The list with generated Routes
+     */
+    public List<Route> generateExternalRoutes(String targetCluster) {
         List<GenericKafkaListener> routeListeners = ListenersUtils.routeListeners(listeners);
         List<Route> routes = new ArrayList<>();
 
@@ -960,6 +1092,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
             for (KafkaPool pool : nodePools)    {
                 if (pool.isBroker()) {
                     for (NodeRef node : pool.nodes()) {
+                        if (ModelUtils.clusterIdExistsButNotEquals(targetCluster, pool.getTargetCluster()))
+                            continue;
                         String routeName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(pool.componentName, node.nodeId(), listener);
                         Route route = new RouteBuilder()
                                 .withNewMetadata()
@@ -988,6 +1122,10 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                             route.getSpec().setHost(host);
                         }
 
+                        if (isRemoteClusterId(targetCluster)) {
+                            route.getMetadata().setOwnerReferences(Collections.emptyList());
+                        }
+
                         routes.add(route);
                     }
                 }
@@ -1003,6 +1141,16 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The list of generated Ingresses
      */
     public List<Ingress> generateExternalBootstrapIngresses() {
+        return generateExternalBootstrapIngresses(false);
+    }
+
+    /**
+     * Generates a list of bootstrap ingress which can be used to bootstrap clients outside of Kubernetes.
+     * @param isRemoteResource      Indicates if the Ingress is to be deployed on a remote cluster
+     *
+     * @return The list of generated Ingresses
+     */
+    public List<Ingress> generateExternalBootstrapIngresses(boolean isRemoteResource) {
         List<GenericKafkaListener> ingressListeners = ListenersUtils.ingressListeners(listeners);
         List<Ingress> ingresses = new ArrayList<>(ingressListeners.size());
 
@@ -1053,6 +1201,10 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                     .build();
 
             ingresses.add(ingress);
+
+            if (isRemoteResource) {
+                ingress.getMetadata().setOwnerReferences(Collections.emptyList());
+            }
         }
 
         return ingresses;
@@ -1064,6 +1216,18 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The list of generated Ingresses
      */
     public List<Ingress> generateExternalIngresses() {
+        return generateExternalIngresses(null);
+    }
+
+    /**
+     * Generates list of per-pod ingress. This ingress is used for exposing it externally using Nginx Ingress.
+     * When the target cluster parameter is given, the function returns the external ingresses for that target
+     * cluster only
+     * @param targetCluster     The target cluster for which the ingresses are being created
+     *
+     * @return The list of generated Ingresses
+     */
+    public List<Ingress> generateExternalIngresses(String targetCluster) {
         List<GenericKafkaListener> ingressListeners = ListenersUtils.ingressListeners(listeners);
         List<Ingress> ingresses = new ArrayList<>();
 
@@ -1071,6 +1235,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
             for (KafkaPool pool : nodePools)    {
                 if (pool.isBroker()) {
                     for (NodeRef node : pool.nodes()) {
+                        if (ModelUtils.clusterIdExistsButNotEquals(targetCluster, pool.getTargetCluster()))
+                            continue;
                         String ingressName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(pool.componentName, node.nodeId(), listener);
                         String host = ListenersUtils.brokerHost(listener, node);
                         String ingressClass = ListenersUtils.controllerClass(listener);
@@ -1113,7 +1279,9 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                                     .withTls(tls)
                                 .endSpec()
                                 .build();
-
+                        if (isRemoteClusterId(targetCluster)) {
+                            ingress.getMetadata().setOwnerReferences(Collections.emptyList());
+                        }
                         ingresses.add(ingress);
                     }
                 }
@@ -1144,14 +1312,33 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return The generated Service
      */
     public Service generateHeadlessService() {
+        return generateHeadlessService(false);
+    }
+
+    /**
+     * Generates a headless Service according to configured defaults
+     * @param isRemoteResource     Indicates if this service is to be deployed in a remote cluster
+     *
+     * @return The generated Service
+     */
+    public Service generateHeadlessService(boolean isRemoteResource) {
         return ServiceUtils.createHeadlessService(
                 KafkaResources.brokersServiceName(cluster),
                 namespace,
                 labels,
-                ownerReference,
+                (isRemoteResource ? null : ownerReference),
                 templateHeadlessService,
                 getHeadlessServicePorts()
         );
+    }
+
+    /**
+     * Gets the broker service name
+     *
+     * @return The broker service name
+     */
+    public String getBrokerServiceName() {
+        return KafkaResources.brokersServiceName(cluster);
     }
 
     /**
@@ -1179,17 +1366,43 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      *                               annotations for each pod are different due to the individual configurations.
      *                               So they need to be dynamically generated though this function instead of just
      *                               passed as Map.
+     * @return List of generated StrimziPodSets with Kafka pods
+     */
+    public List<StrimziPodSet> generatePodSets(boolean isOpenShift,
+                                                ImagePullPolicy imagePullPolicy,
+                                                List<LocalObjectReference> imagePullSecrets,
+                                                Function<NodeRef, Map<String, String>> podAnnotationsProvider) {
+        return generatePodSets(isOpenShift, imagePullPolicy, imagePullSecrets, podAnnotationsProvider, null, null);
+    }
+
+    /**
+     * Generates the StrimziPodSet for the Kafka cluster.
+     *
+     * @param isOpenShift            Flags whether we are on OpenShift or not
+     * @param imagePullPolicy        Image pull policy which will be used by the pods
+     * @param imagePullSecrets       List of image pull secrets
+     * @param podAnnotationsProvider Function which provides annotations for given pod based on its broker ID. The
+     *                               annotations for each pod are different due to the individual configurations.
+     *                               So they need to be dynamically generated though this function instead of just
+     *                               passed as Map.
+     * @param targetClusterId        Stretch Target Cluster ID
+     * @param centralClusterId       Stretch Cluster Central Cluster ID
      *
      * @return List of generated StrimziPodSets with Kafka pods
      */
     public List<StrimziPodSet> generatePodSets(boolean isOpenShift,
                                                ImagePullPolicy imagePullPolicy,
                                                List<LocalObjectReference> imagePullSecrets,
-                                               Function<NodeRef, Map<String, String>> podAnnotationsProvider) {
+                                               Function<NodeRef, Map<String, String>> podAnnotationsProvider,
+                                               String targetClusterId,
+                                               String centralClusterId) {
         List<StrimziPodSet> podSets = new ArrayList<>();
 
         for (KafkaPool pool : nodePools)    {
-            podSets.add(WorkloadUtils.createPodSet(
+            String clusterId = pool.getTargetCluster();
+            if (targetClusterId != null && !targetClusterId.equals(clusterId))
+                continue;
+            StrimziPodSet podSet = WorkloadUtils.createPodSet(
                     pool.componentName,
                     namespace,
                     pool.labels,
@@ -1215,8 +1428,12 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                             getPodSetVolumes(node, pool.storage, pool.templatePod, isOpenShift),
                             imagePullSecrets,
                             securityProvider.kafkaPodSecurityContext(new PodSecurityProviderContextImpl(pool.storage, pool.templatePod))
-                    )
-            ));
+                            ),
+                            clusterId,
+                            centralClusterId
+                        );
+        
+            podSets.add(podSet);
         }
 
         return podSets;
@@ -1236,10 +1453,30 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return  The generated Secrets containing Kafka node certificates
      */
     public List<Secret> generateCertificatesSecrets(ClusterCa clusterCa, ClientsCa clientsCa, List<Secret> existingSecrets, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied) {
+        return generateCertificatesSecrets(clusterCa, clientsCa, existingSecrets, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, null);
+    }
+
+    /**
+     * Generates the private keys for the Kafka nodes (if needed) and the Secrets with them which contain both the
+     * public and private keys. These will be created for the target cluster specified
+     *
+     * @param clusterCa                             The CA for cluster certificates
+     * @param clientsCa                             The CA for clients certificates
+     * @param existingSecrets                       The existing secrets containing Kafka certificates
+     * @param externalBootstrapDnsName              Map with bootstrap DNS names which should be added to the certificate
+     * @param externalDnsNames                      Map with broker DNS names  which should be added to the certificate
+     * @param isMaintenanceTimeWindowsSatisfied     Indicates whether we are in a maintenance window or not
+     * @param targetClusterId                       Cluster Id of the cluster that the secrets are to be generated
+     *
+     * @return  The generated Secrets containing Kafka node certificates
+     */
+    public List<Secret> generateCertificatesSecrets(ClusterCa clusterCa, ClientsCa clientsCa, List<Secret> existingSecrets, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied, String targetClusterId) {
         Map<String, Secret> existingSecretWithName = existingSecrets.stream().collect(Collectors.toMap(secret -> secret.getMetadata().getName(), secret -> secret));
         Set<NodeRef> nodes = nodes();
         Map<String, CertAndKey> existingCerts = new HashMap<>();
         for (NodeRef node : nodes) {
+            if (ModelUtils.clusterIdExistsButNotEquals(targetClusterId, node.clusterId()))
+                continue;
             String podName = node.podName();
             // Reuse existing certificate if it exists and the CA cert generation hasn't changed since they were generated
             if (existingSecretWithName.get(podName) != null) {
@@ -1256,7 +1493,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         Map<String, CertAndKey> updatedCerts;
         try {
             updatedCerts = clusterCa.generateBrokerCerts(namespace, cluster, existingCerts,
-                    nodes, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied);
+                    nodes, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, targetClusterId);
         } catch (IOException e) {
             LOGGER.warnCr(reconciliation, "Error while generating certificates", e);
             throw new RuntimeException("Failed to prepare Kafka certificates", e);
@@ -1264,7 +1501,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
 
         return updatedCerts.entrySet()
                 .stream()
-                .map(entry -> ModelUtils.createSecret(entry.getKey(), namespace, labels, ownerReference,
+                .map(entry -> ModelUtils.createSecret(entry.getKey(), namespace, labels, isRemoteClusterId(targetClusterId) ? null : ownerReference,
                         CertUtils.buildSecretData(entry.getKey(), entry.getValue()),
                         Map.ofEntries(
                                 clusterCa.caCertGenerationFullAnnotation(),
@@ -1310,6 +1547,23 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         ports.addAll(jmx.containerPorts());
 
         return ports;
+    }
+
+    /**
+     * Generate the persistent volume claims for this targetcluster.
+     * @param targetClusterId   The kube cluster where the PVCs are to be created
+     *
+     * @return The list of PersistentVolumeClaims used by this Kafka cluster
+     */
+    public List<PersistentVolumeClaim> generatePersistentVolumeClaimsAtCluster(String targetClusterId) {
+        List<PersistentVolumeClaim> pvcs = new ArrayList<>();
+        List<KafkaPool> pools = nodePools.stream().filter(x -> x.getTargetCluster().equals(targetClusterId)).toList();
+
+        for (KafkaPool pool : pools)    {
+            pvcs.addAll(generatePersistentVolumeClaimsForPool(pool, pool.storage));
+        }
+
+        return pvcs;
     }
 
     /**
@@ -1819,9 +2073,17 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return  String with the Kafka broker configuration
      */
     private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
-        return new KafkaBrokerConfigurationBuilder(reconciliation, node)
+        KafkaBrokerConfigurationBuilder builder = new KafkaBrokerConfigurationBuilder(reconciliation, node)
+                .withStretch(isStretchMode)
                 .withRackId(rack)
-                .withKRaft(cluster, namespace, nodes())
+                .withKRaft(cluster, namespace, nodes());
+
+        // If stretch mode is enabled and we have a networking provider, set it on the builder
+        if (isStretchMode && stretchNetworkingProvider != null) {
+            builder = builder.withStretchNetworkingProvider(stretchNetworkingProvider);
+        }
+
+        return builder
                 .withKRaftMetadataLogDir(VolumeUtils.kraftMetadataPath(pool.storage))
                 .withLogDirs(VolumeUtils.createVolumeMounts(pool.storage, false))
                 .withListeners(cluster,
@@ -1855,6 +2117,20 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return ConfigMap with the shared configuration.
      */
     public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(MetricsAndLogging metricsAndLogging, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
+        return generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts, null);
+    }
+    /**
+     * Generates a list of configuration ConfigMaps - one for each broker in the cluster. The ConfigMaps contain the
+     * configurations which should be used by given broker. This is used with StrimziPodSets.
+     *
+     * @param metricsAndLogging   Object with logging and metrics configuration collected from external user-provided config maps
+     * @param advertisedHostnames Map with advertised hostnames for different brokers and listeners
+     * @param advertisedPorts     Map with advertised ports for different brokers and listeners
+     * @param targetClusterId     Cluster Id where the clusters are to be created
+     *
+     * @return ConfigMap with the shared configuration.
+     */
+    public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(MetricsAndLogging metricsAndLogging, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts, String targetClusterId)   {
         String parsedMetrics = null;
         if (metrics instanceof JmxPrometheusExporterModel exporter) {
             parsedMetrics = exporter.metricsJson(reconciliation, metricsAndLogging.metricsCm());
@@ -1863,6 +2139,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         List<ConfigMap> configMaps = new ArrayList<>();
 
         for (KafkaPool pool : nodePools)    {
+            if (ModelUtils.clusterIdExistsButNotEquals(targetClusterId, pool.getTargetCluster()))
+                    continue;
             for (NodeRef node : pool.nodes())   {
                 Map<String, String> data = new HashMap<>(4);
 
@@ -1885,8 +2163,11 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 data.put(BROKER_CLUSTER_ID_FILENAME, clusterId);
                 data.put(BROKER_METADATA_VERSION_FILENAME, metadataVersion);
 
-                configMaps.add(ConfigMapUtils.createConfigMap(node.podName(), namespace, pool.labels.withStrimziPodName(node.podName()), pool.ownerReference, data));
-
+                if (isRemoteClusterId(targetClusterId)) {
+                    configMaps.add(ConfigMapUtils.createRemoteConfigMap(node.podName(), namespace, pool.labels.withStrimziPodName(node.podName()), data));
+                } else {
+                    configMaps.add(ConfigMapUtils.createConfigMap(node.podName(), namespace, pool.labels.withStrimziPodName(node.podName()), pool.ownerReference, data));
+                }
             }
         }
 
@@ -1933,6 +2214,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      */
     public QuotasPlugin quotas() {
         return quotas;
+    }
+
+
+    /**
+     * @return  Returns true if stretch mode is enabled in the kafka CR
+     */
+    public boolean isStretchModeEnabled() {
+        return isStretchMode;
     }
 
     /**
@@ -2010,5 +2299,171 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         public NodePoolNotFoundException(String message) {
             super(message);
         }
+    }
+
+
+
+    /**
+     * Generates list of references to Kafka nodes for this Kafka cluster, in the specified kube cluster.
+     * The references contain both the pod name and the ID of the Kafka node.
+     * @param targetClusterId   The cluster Id of the kube cluster where the nodes are deployed
+     *
+     * @return  Set of Kafka node references
+     */
+    public Set<NodeRef> nodesAtCluster(String targetClusterId) {
+        Set<NodeRef> nodes = new LinkedHashSet<>();
+        List<KafkaPool> pools = nodePools.stream()
+                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
+                                        .toList();
+
+        for (KafkaPool pool : nodePools) {
+            nodes.addAll(pool.nodes());
+        }
+
+        return nodes;
+    }
+
+
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod services.
+     *
+     * @return The Map targetCluster and their generated Services
+     */
+    public Map<String, List<Service>> generateClusteredPerPodServices() {
+        Map<String, List<Service>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generatePerPodServices(targetClusterId));
+        }
+
+        return result;
+    }
+
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod external Ingresses
+     *
+     * @return The Map targetCluster and their generated Ingresses
+     */
+    public Map<String, List<Ingress>> generateClusteredExternalIngresses() {
+        Map<String, List<Ingress>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generateExternalIngresses(targetClusterId));
+        }
+
+        return result;
+    }
+
+    /**
+     * Generates Map of targetCluster and the list of corresponding
+     * per pod external Routes
+     *
+     * @return The Map of targetClusters and their generated Routes
+     */
+    public Map<String, List<Route>> generateClusteredExternalRoutes() {
+        Map<String, List<Route>> result = new HashMap<>();
+
+        for (String targetClusterId : remoteClusterIds) {
+            result.put(targetClusterId, generateExternalRoutes(targetClusterId));
+        }
+
+        return result;
+    }
+
+
+    /**
+     * Generates a clustered StrimziPodSet for the stretched kafka cluster
+     *
+     * @param isOpenShift            Flags whether we are on OpenShift or not
+     * @param imagePullPolicy        Image pull policy which will be used by the pods
+     * @param imagePullSecrets       List of image pull secrets
+     * @param podAnnotationsProvider Function which provides annotations for given pod based on its broker ID. The
+     *                               annotations for each pod are different due to the individual configurations.
+     *                               So they need to be dynamically generated though this function instead of just
+     *                               passed as Map.
+     * @param centralClusterId       Stretch Cluster Central Cluster ID
+     *
+     * @return List of generated StrimziPodSets with Kafka pods
+     */
+    public Map<String, List<StrimziPodSet>> generateClusteredPodSets(boolean isOpenShift,
+        ImagePullPolicy imagePullPolicy,
+        List<LocalObjectReference> imagePullSecrets,
+        Function<NodeRef, Map<String, String>> podAnnotationsProvider,
+        String centralClusterId) {
+
+        Map<String, List<StrimziPodSet>> podSets = new HashMap<>();
+
+        for (String targetCluster : clusterIds) {
+            podSets
+                .computeIfAbsent(targetCluster, k -> new ArrayList<>())
+                .addAll(
+                    generatePodSets(
+                        isOpenShift,
+                        imagePullPolicy,
+                        imagePullSecrets,
+                        podAnnotationsProvider,
+                        targetCluster,
+                        centralClusterId
+                    )
+                );
+        }
+
+        return podSets;
+    }
+
+    /**
+     * Generates list of Kafka node IDs that are going to be added to the Kafka cluster in a streched cluster as brokers.
+     * This reports all broker nodes on cluster creation as well as the newly added ones on scaling up.
+     * @param targetClusterId  The stretch cluster ID where the nodes are going to be created
+     *
+     * 
+     * @return  Set of Kafka node IDs which are going to be added as brokers.
+     */
+    public Set<NodeRef> addedNodesAtCluster(String targetClusterId) {
+        Set<NodeRef> nodes = new LinkedHashSet<>();
+        List<KafkaPool> pools = nodePools.stream()
+                                        .filter(x -> x.getTargetCluster().equals(targetClusterId))
+                                        .toList();
+        for (KafkaPool pool : pools) {
+            nodes.addAll(pool.scaleUpNodes());
+        }
+
+        return nodes;
+    }
+
+    /**
+     * @return  Returns the central cluster Id of a stretched kafka cluster
+     */
+    public String getCentralClusterId() {
+        return centralClusterId;
+    }
+
+
+
+
+    /**
+     * @return  Returns target cluster Ids defined in KafkaNodePools of a kafka cluster
+     */
+    public List<String> getTargetClusterIds() {
+        return remoteClusterIds;
+    }
+
+
+    /**
+     * @return  Returns the stretch networking provider (can be null for non-stretch clusters)
+     */
+    public StretchNetworkingProvider getStretchNetworkingProvider() {
+        return stretchNetworkingProvider;
+    }
+
+        /**
+         * Returns the list of KafkaNodePools for this KafkaCluster.
+         *
+         * @return List of KafkaNodePools
+         */
+    public List<KafkaPool> getNodePools() {
+        return nodePools;
     }
 }

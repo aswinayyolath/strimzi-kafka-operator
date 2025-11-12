@@ -34,7 +34,10 @@ import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.operator.VertxUtil;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.CrdOperator;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StrimziPodSetOperator;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.InvalidConfigurationException;
 import io.strimzi.operator.common.Reconciliation;
@@ -42,6 +45,7 @@ import io.strimzi.operator.common.ReconciliationException;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.config.ConfigParameter;
 import io.strimzi.operator.common.model.ClientsCa;
+import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.NamespaceAndName;
 import io.strimzi.operator.common.model.PasswordGenerator;
@@ -50,10 +54,13 @@ import io.strimzi.operator.common.model.StatusUtils;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +76,8 @@ import java.util.Set;
  */
 public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesClient, Kafka, KafkaList, Resource<Kafka>, KafkaSpec, KafkaStatus> {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(KafkaAssemblyOperator.class.getName());
+
+    private static final Logger INIT_LOGGER = LogManager.getLogger(KafkaAssemblyOperator.class);
 
     private static final Properties PROPERTIES = new Properties();
     /**
@@ -106,6 +115,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
     private final StrimziPodSetOperator strimziPodSetOperator;
     private final CrdOperator<KubernetesClient, KafkaNodePool, KafkaNodePoolList> nodePoolOperator;
     protected Clock clock;
+    private StretchNetworkingProvider stretchNetworkingProvider;
+    private io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier;
 
     /**
      * @param vertx The Vertx instance
@@ -131,9 +142,130 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         this.clock = Clock.systemUTC();
     }
 
+    /**
+     * Add stretch cluster capabilities to this operator.
+     * This method should be called after construction if stretch cluster mode is enabled.
+     *
+     * @param remoteResourceOperatorSupplier Supplies the operators for remote clusters
+     * @return This operator instance for method chaining
+     */
+    public KafkaAssemblyOperator withStretchCapabilities(
+            io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier) {
+
+        if (config.isStretchClusterConfigured()) {
+            INIT_LOGGER.info("Stretch cluster configuration detected (central: {}, provider: {})",
+                           config.getCentralClusterId(),
+                           config.getStretchNetworkProvider() != null ? config.getStretchNetworkProvider() : "mcs (default)");
+
+            // Provider defaults to "mcs" for now if not specified - no need to throw exception
+            // TODO: We should throw exception if provider is not specified
+            // TODO: MCS won't be the default in the future, as Per Strimzi maintainers Kube primitive service Type
+            // Should be the default in that case it will be NodePort or Loadbalancers
+            // But we need to support MCS for now and discuss about this later
+
+            try {
+                // Get the globally initialized networking provider from DnsNameGenerator
+                StretchNetworkingProvider networkingProvider = io.strimzi.operator.cluster.model.DnsNameGenerator.getStretchProvider();
+
+                if (networkingProvider == null) {
+                    INIT_LOGGER.warn("Stretch cluster mode enabled but networking provider not initialized. " +
+                               "This may indicate a configuration issue.");
+                }
+
+                // Store the provider and remote supplier for use in reconciliation
+                this.stretchNetworkingProvider = networkingProvider;
+                this.remoteResourceOperatorSupplier = remoteResourceOperatorSupplier;
+
+                INIT_LOGGER.info("Stretch cluster support initialized with provider: {}",
+                           networkingProvider != null ? networkingProvider.getProviderName() : "none");
+            } catch (Exception e) {
+                throw new InvalidConfigurationException("Failed to initialize stretch cluster support", e);
+            }
+        } else {
+            this.stretchNetworkingProvider = null;
+            this.remoteResourceOperatorSupplier = null;
+            INIT_LOGGER.info("Stretch cluster mode disabled");
+        }
+
+        return this;
+    }
+
     @Override
-    @SuppressWarnings({"checkstyle:NPathComplexity"})
+    @SuppressWarnings({"checkstyle:NPathComplexity", "checkstyle:CyclomaticComplexity"})
     public Future<KafkaStatus> createOrUpdate(Reconciliation reconciliation, Kafka kafkaAssembly) {
+        // CRITICAL: Check if KNPs have stretch annotations but Kafka CR doesn't
+        // This prevents creating a normal cluster when stretch mode is misconfigured
+        if (config.isStretchClusterConfigured() && !isStretchClusterWithPluggableProvider(kafkaAssembly)) {
+            return nodePoolOperator.listAsync(reconciliation.namespace(), Labels.forStrimziCluster(reconciliation.name()))
+                .compose(nodePools -> {
+                    // Check if any KNP has stretch-cluster-alias annotation
+                    boolean hasStretchKNPs = nodePools.stream()
+                        .anyMatch(pool -> pool.getMetadata().getAnnotations() != null
+                            && pool.getMetadata().getAnnotations().containsKey("strimzi.io/stretch-cluster-alias"));
+
+                    if (hasStretchKNPs) {
+                        String errorMsg = String.format(
+                            "Kafka CR '%s' is missing required annotation 'strimzi.io/enable-stretch-cluster: true' " +
+                            "but one or more KafkaNodePools have 'strimzi.io/stretch-cluster-alias' annotations. " +
+                            "Either add the annotation to the Kafka CR or remove stretch annotations from all node pools.",
+                            kafkaAssembly.getMetadata().getName()
+                        );
+                        LOGGER.errorCr(reconciliation, errorMsg);
+
+                        KafkaStatus status = new KafkaStatus();
+                        io.strimzi.api.kafka.model.common.Condition condition =
+                            new io.strimzi.api.kafka.model.common.ConditionBuilder()
+                                .withType("Ready")
+                                .withStatus("False")
+                                .withReason("MissingStretchAnnotation")
+                                .withMessage(errorMsg)
+                                .withLastTransitionTime(StatusUtils.iso8601Now())
+                                .build();
+                        status.setConditions(List.of(condition));
+                        status.setObservedGeneration(kafkaAssembly.getMetadata().getGeneration());
+
+                        return Future.succeededFuture(status);
+                    }
+
+                    // No stretch KNPs, proceed with regular reconciliation
+                    return continueStandardReconciliation(reconciliation, kafkaAssembly);
+                });
+        }
+
+        // Check if we're trying to switch from stretch to non-stretch mode
+        // This is not supported - user must delete and recreate the cluster
+        if (config.isStretchClusterConfigured() && !isStretchClusterWithPluggableProvider(kafkaAssembly)) {
+            // Check if there are existing pods with stretch cluster annotations
+            return supplier.podOperations.listAsync(reconciliation.namespace(), Labels.forStrimziCluster(reconciliation.name()))
+                .compose(pods -> {
+                    boolean hasStretchPods = pods.stream()
+                        .anyMatch(pod -> pod.getMetadata().getAnnotations() != null
+                            && pod.getMetadata().getAnnotations().containsKey("strimzi.io/stretch-cluster-alias"));
+
+                    if (hasStretchPods) {
+                        String errorMsg = String.format(
+                            "Cannot switch Kafka cluster '%s' from stretch cluster mode to standard mode. " +
+                            "Existing stretch cluster pods detected. " +
+                            "To switch modes, you must: 1) Delete the Kafka cluster, 2) Remove stretch cluster annotations from node pools, 3) Recreate the cluster.",
+                            kafkaAssembly.getMetadata().getName()
+                        );
+                        LOGGER.errorCr(reconciliation, errorMsg);
+                        return Future.failedFuture(new InvalidResourceException(errorMsg));
+                    }
+
+                    // No stretch pods found, proceed with standard reconciliation
+                    return continueStandardReconciliation(reconciliation, kafkaAssembly);
+                });
+        }
+
+        return continueStandardReconciliation(reconciliation, kafkaAssembly);
+    }
+
+    /**
+     * Continue with standard (non-stretch) reconciliation.
+     */
+    @SuppressWarnings({"checkstyle:NPathComplexity", "checkstyle:CyclomaticComplexity"})
+    private Future<KafkaStatus> continueStandardReconciliation(Reconciliation reconciliation, Kafka kafkaAssembly) {
         Promise<KafkaStatus> createOrUpdatePromise = Promise.promise();
         ReconciliationState reconcileState = createReconciliationState(reconciliation, kafkaAssembly);
 
@@ -222,8 +354,11 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         }
 
         reconcileState.initialStatus()
+                // Validate stretch cluster configuration before creating any resources
+                .compose(state -> state.validateStretchConfiguration())
                 // Preparation steps => prepare cluster descriptions, handle CA creation or changes
                 .compose(state -> state.reconcileCas(clock))
+                .compose(state -> state.reconcileRemoteCas(clock))
                 .compose(state -> state.emitCertificateSecretMetrics())
                 .compose(state -> state.versionChange())
 
@@ -394,6 +529,46 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         }
 
         /**
+         * Validates stretch cluster configuration before creating any resources.
+         * This prevents CA secrets and other resources from being created when configuration is invalid.
+         *
+         * @return Future with Reconciliation State, or failed future if validation fails
+         */
+        Future<ReconciliationState> validateStretchConfiguration() {
+            // Only validate if stretch cluster mode is enabled
+            if (!isStretchClusterWithPluggableProvider(kafkaAssembly)) {
+                return Future.succeededFuture(this);
+            }
+
+            // Get node pools for validation
+            return nodePoolOperator.listAsync(namespace, Labels.forStrimziCluster(name))
+                .compose(nodePools -> {
+                    // Create validator
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator validator = 
+                        new io.strimzi.operator.cluster.stretch.StretchClusterValidator(
+                            vertx,
+                            config.getCentralClusterId(),
+                            config.getRemoteClusters().keySet()
+                        );
+
+                    // Validate configuration
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result = 
+                        validator.validateKafkaConfiguration(kafkaAssembly, nodePools, true);
+
+                    if (!result.isValid()) {
+                        // Don't update status here - let the normal reconciliation error handling do it
+                        // This prevents the reconciliation loop caused by repeated status updates
+                        // Rohan to check if this is the right way to handle this
+                        return Future.failedFuture(
+                            new InvalidConfigurationException(result.getErrorMessage())
+                        );
+                    }
+
+                    return Future.succeededFuture(this);
+                });
+        }
+
+        /**
          * Creates the CaReconciler instance and reconciles the Clients and Cluster CAs. The resulting CAs are stored
          * in the ReconciliationState and used later to reconcile the operands.
          *
@@ -425,6 +600,48 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
             metrics.clientCaCertificateExpiration(this.name, this.namespace).set(clientCertificateExpiration);
 
             return Future.succeededFuture(this);
+        }
+
+        Future<ReconciliationState> reconcileRemoteCas(Clock clock) {
+            List<Future<Void>> futures = new ArrayList<>();
+            Set<String> remoteClusterIds = config.getRemoteClusters().keySet();
+            for (String targetClusterId : remoteClusterIds) {
+                SecretOperator remoteSecretOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).secretOperations;
+                StrimziPodSetOperator remotePodSetOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).strimziPodSetOperator;
+                PodOperator remotePodOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).podOperations;
+                CaReconciler remoteCaReconciler = new CaReconciler(
+                    reconciliation,
+                    kafkaAssembly,
+                    config,
+                    supplier,
+                    vertx,
+                    certManager,
+                    passwordGenerator
+                );
+
+                remoteCaReconciler.withStretchConfig(
+                    remoteSecretOp,
+                    remotePodSetOp,
+                    remotePodOp,
+                    clusterCa,
+                    clientsCa,
+                    targetClusterId
+                );
+
+                futures.add(
+                    remoteCaReconciler.reconcile(clock)
+                        .compose(result -> {
+                            LOGGER.debugOp("{}: CAs reconciled in remote cluster {}", 
+                                       reconciliation, targetClusterId);
+                            return Future.succeededFuture();
+                        })
+                );
+            }
+
+            return Future.join(futures).map(this);
         }
 
         /**
@@ -461,7 +678,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          * @return  KafkaReconciler instance
          */
         KafkaReconciler kafkaReconciler(List<KafkaNodePool> nodePools, KafkaCluster kafkaCluster) {
-            return new KafkaReconciler(
+            KafkaReconciler reconciler = new KafkaReconciler(
                     reconciliation,
                     kafkaAssembly,
                     nodePools,
@@ -473,6 +690,19 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     pfa,
                     vertx
             );
+
+            // Setup stretch cluster configuration if enabled
+            if (isStretchClusterWithPluggableProvider(kafkaAssembly) &&
+                KafkaAssemblyOperator.this.remoteResourceOperatorSupplier != null) {
+                reconciler.setupStretchClusterConfig(
+                    KafkaAssemblyOperator.this.remoteResourceOperatorSupplier,
+                    KafkaAssemblyOperator.this.stretchNetworkingProvider,
+                    KafkaAssemblyOperator.this.config.getCentralClusterId(),
+                    KafkaAssemblyOperator.this.supplier
+                );
+            }
+
+            return reconciler;
         }
 
         /**
@@ -538,7 +768,11 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
          */
         Future<ReconciliationState> reconcileKafka(Clock clock)    {
             return kafkaReconciler()
-                    .compose(reconciler -> reconciler.reconcile(kafkaStatus, clock))
+                    .compose(reconciler -> {
+                        if (reconciler.isStretchMode)
+                            return reconciler.reconcileStretchedKafka(kafkaStatus, clock);
+                        return reconciler.reconcile(kafkaStatus, clock);
+                    })
                     .map(this);
         }
 
@@ -693,7 +927,17 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      */
     @Override
     protected Future<Boolean> delete(Reconciliation reconciliation) {
-        return ReconcilerUtils.withIgnoreRbacError(reconciliation, clusterRoleBindingOperations.reconcile(reconciliation, KafkaResources.initContainerClusterRoleBindingName(reconciliation.name(), reconciliation.namespace()), null), null)
+          // Note: Stretch cluster deletion is now handled by the regular deletion flow
+        // Remote resources will be cleaned up by their respective operators
+        Future<Void> stretchDeletion = Future.succeededFuture();
+
+        // Then delete the ClusterRoleBinding
+        return stretchDeletion
+                .compose(v -> ReconcilerUtils.withIgnoreRbacError(reconciliation,
+                    clusterRoleBindingOperations.reconcile(reconciliation,
+                        KafkaResources.initContainerClusterRoleBindingName(reconciliation.name(), reconciliation.namespace()),
+                        null),
+                    null))
                 .map(Boolean.FALSE); // Return FALSE since other resources are still deleted by garbage collection
     }
 
@@ -726,6 +970,37 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      */
     public Future<ReconnectingWatcher<KafkaNodePool>> createNodePoolWatch(String namespace) {
         return VertxUtil.async(vertx, () -> new ReconnectingWatcher<>(nodePoolOperator, KafkaNodePool.RESOURCE_KIND, namespace, null, this::nodePoolEventHandler));
+    }
+
+    /**
+     * Check if a Kafka CR is configured for stretch cluster mode with pluggable provider.
+     * This is different from the existing stretch cluster implementation which uses MCS directly.
+     *
+     * @param kafka Kafka custom resource
+     * @return true if this is a stretch cluster that should use the pluggable provider
+     */
+    private boolean isStretchClusterWithPluggableProvider(Kafka kafka) {
+        // Check if Kafka has the stretch cluster annotation
+        Map<String, String> annotations = kafka.getMetadata().getAnnotations();
+        boolean hasAnnotation = annotations != null && "true".equals(annotations.get("strimzi.io/enable-stretch-cluster"));
+
+        // If annotation is present, validate that stretch cluster configuration is also present
+        if (hasAnnotation && !config.isStretchClusterConfigured()) {
+            throw new InvalidResourceException(
+                String.format("Kafka cluster '%s' has annotation 'strimzi.io/enable-stretch-cluster: true', " +
+                    "but required environment variables STRIMZI_REMOTE_KUBE_CONFIG and STRIMZI_CENTRAL_CLUSTER_ID " +
+                    "are not properly configured in the cluster operator deployment. " +
+                    "Please configure these environment variables or remove the annotation.",
+                    kafka.getMetadata().getName())
+            );
+        }
+
+        // Check if stretch cluster configuration is present (central + remote cluster config)
+        if (!config.isStretchClusterConfigured()) {
+            return false;
+        }
+
+        return hasAnnotation;
     }
 
     /**

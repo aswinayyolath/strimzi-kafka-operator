@@ -25,6 +25,7 @@ import io.strimzi.operator.cluster.model.DefaultSharedEnvironmentProvider;
 import io.strimzi.operator.cluster.model.SharedEnvironmentProvider;
 import io.strimzi.operator.cluster.operator.assembly.BrokersInUseCheck;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.AbstractResourceOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.BuildConfigOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.BuildOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ClusterRoleBindingOperator;
@@ -51,6 +52,8 @@ import io.strimzi.operator.common.DefaultAdminClientProvider;
 import io.strimzi.operator.common.MetricsProvider;
 import io.strimzi.operator.common.featuregates.FeatureGates;
 import io.vertx.core.Vertx;
+
+import java.lang.reflect.Field;
 
 /**
  * Class holding the various resource operator and providers of various clients
@@ -246,6 +249,27 @@ public class ResourceOperatorSupplier {
     }
 
     /**
+     * Constructor for stretch cluster code
+     *
+     * @param vertx                 Vert.x instance
+     * @param client                Kubernetes Client
+     * @param metricsProvider       Metrics provider
+     * @param pfa                   Platform Availability Features
+     * @param operatorName          Name of this operator instance
+     */
+    public ResourceOperatorSupplier(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, String operatorName) {
+        this(vertx,
+            client,
+            new DefaultAdminClientProvider(),
+            new DefaultKafkaAgentClientProvider(),
+            metricsProvider,
+            pfa,
+            new KubernetesRestartEventPublisher(client, operatorName),
+            new FeatureGates("")
+        );
+    }
+
+    /**
      * Constructor used for tests
      *
      * @param vertx                    Vert.x instance
@@ -436,5 +460,25 @@ public class ResourceOperatorSupplier {
         this.restartEventsPublisher = restartEventsPublisher;
         this.sharedEnvironmentProvider = sharedEnvironmentProvider;
         this.brokersInUseCheck = brokersInUseCheck;
+    }
+
+    /**
+     * Get the Kubernetes client used by this supplier.
+     * This is useful for plugins that need direct access to the Kubernetes API.
+     *
+     * Used by: McsNetworkingProvider to create ServiceExportHelper instances
+     *
+     * @return KubernetesClient instance
+     */
+    public KubernetesClient getKubernetesClient() {
+        // Access the client through reflection since it's a protected field
+        // This is necessary for external plugins to access the Kubernetes API
+        try {
+            Field clientField = AbstractResourceOperator.class.getDeclaredField("client");
+            clientField.setAccessible(true);
+            return (KubernetesClient) clientField.get(serviceOperations);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to access Kubernetes client", e);
+        }
     }
 }

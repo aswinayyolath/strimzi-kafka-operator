@@ -22,6 +22,7 @@ import io.strimzi.api.kafka.model.kafka.KafkaMetadataState;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
 import io.strimzi.certs.CertAndKey;
+import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.model.PodRevision;
 import io.strimzi.operator.cluster.model.PodSetUtils;
@@ -306,6 +307,7 @@ public class ReconcilerUtils {
                 pod.getMetadata().getName(),
                 ReconcilerUtils.getPodIndexFromPodName(pod.getMetadata().getName()),
                 ReconcilerUtils.getPoolNameFromPodName(clusterNameFromLabel(pod), pod.getMetadata().getName()),
+                ModelUtils.getTargetClusterAlias(pod),
                 hasRole(pod, Labels.STRIMZI_CONTROLLER_ROLE_LABEL),
                 hasRole(pod, Labels.STRIMZI_BROKER_ROLE_LABEL));
     }

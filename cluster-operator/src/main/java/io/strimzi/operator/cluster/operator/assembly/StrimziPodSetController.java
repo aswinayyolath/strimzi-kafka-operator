@@ -78,6 +78,9 @@ public class StrimziPodSetController implements Runnable {
     private final Informer<KafkaConnect> kafkaConnectInformer;
     private final Informer<KafkaMirrorMaker2> kafkaMirrorMaker2Informer;
 
+    private boolean isStretchConfigured;
+    private String centralClusterId;
+
     /**
      * Creates the StrimziPodSet controller. The controller should normally exist once per operator for cluster-wide mode
      * or once per namespace for namespaced mode.
@@ -127,6 +130,19 @@ public class StrimziPodSetController implements Runnable {
         this.podInformer = podOperator.informer(watchedNamespace, POD_LABEL_SELECTOR, DEFAULT_RESYNC_PERIOD_MS);
 
         this.controllerThread = new Thread(this, "StrimziPodSetController");
+    }
+
+    /**
+     * Create StrimziPodSetController with stretch capabilites
+     * @param isStretchConfigured           Indicates weather the stretch cluster config is set properly at env
+     * @param centralClusterId              Indicates the central cluster id for a stretched kafka configuration
+     * @return Instance of StrimziPodSetController with stretch capabilites
+     */
+    public StrimziPodSetController withStretchCapabilities(boolean isStretchConfigured, String centralClusterId) {
+        this.isStretchConfigured = isStretchConfigured;
+        this.centralClusterId = centralClusterId;
+
+        return this;
     }
 
     protected ControllerMetricsHolder metrics()   {
@@ -273,6 +289,9 @@ public class StrimziPodSetController implements Runnable {
      * @return          True if the StrimziPodSet's Kafka cluster matches the selector labels
      */
     private boolean matchesCrSelector(StrimziPodSet podSet)    {
+        if (PodSetUtils.isRemotePodSet(podSet, isStretchConfigured, centralClusterId)) {
+            return true;
+        }
         if (podSet.getMetadata().getLabels() != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_KIND_LABEL) != null
                 && podSet.getMetadata().getLabels().get(Labels.STRIMZI_CLUSTER_LABEL) != null) {

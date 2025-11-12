@@ -16,6 +16,9 @@ import io.strimzi.operator.cluster.operator.assembly.KafkaConnectAssemblyOperato
 import io.strimzi.operator.cluster.operator.assembly.KafkaMirrorMaker2AssemblyOperator;
 import io.strimzi.operator.cluster.operator.assembly.KafkaRebalanceAssemblyOperator;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
+import io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier;
+import io.strimzi.operator.cluster.stretch.StretchInitializer;
 import io.strimzi.operator.common.MetricsProvider;
 import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.strimzi.operator.common.OperatorKubernetesClientBuilder;
@@ -37,6 +40,7 @@ import org.apache.logging.log4j.Logger;
 import java.security.Security;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -82,10 +86,33 @@ public class Main {
         MetricsProvider metricsProvider = new MicrometerMetricsProvider(BackendRegistries.getDefaultNow());
         KubernetesClient client = new OperatorKubernetesClientBuilder("strimzi-cluster-operator", strimziVersion).build();
 
+        RemoteClientSupplier remoteClientSupplier = RemoteClientSupplier.buildFromClusterInfo(
+                config.getOperatorNamespace(),
+                config.getRemoteClusters(),
+                new SecretOperator(vertx, client)
+            );
+
         startHealthServer(vertx, metricsProvider)
                 .compose(i -> leaderElection(client, config, shutdownHook))
                 .compose(i -> createPlatformFeaturesAvailability(vertx, client))
-                .compose(pfa -> deployClusterOperatorVerticles(vertx, client, metricsProvider, pfa, config, shutdownHook))
+                .compose(centralPfa -> {
+                    // Initialize stretch cluster functionality
+                    return StretchInitializer.initialize(config, vertx, client, remoteClientSupplier, centralPfa)
+                            .compose(stretchResult -> {
+                                return deployClusterOperatorVerticles(
+                                    vertx,
+                                    client,
+                                    remoteClientSupplier,
+                                    metricsProvider,
+                                    centralPfa,
+                                    config,
+                                    shutdownHook,
+                                    stretchResult.getRemotePfas(),
+                                    stretchResult.getRemoteResourceOperatorSupplier()
+                                );
+                            })
+                            .mapEmpty();
+                })
                 .onComplete(res -> {
                     if (res.failed())   {
                         LOGGER.error("Unable to start operator for 1 or more namespace", res.cause());
@@ -136,8 +163,9 @@ public class Main {
      *
      * @return  Future which completes when all Cluster Operator verticles are started and running
      */
-    static CompositeFuture deployClusterOperatorVerticles(Vertx vertx, KubernetesClient client, MetricsProvider metricsProvider,
-                                                          PlatformFeaturesAvailability pfa, ClusterOperatorConfig config, ShutdownHook shutdownHook) {
+    static CompositeFuture deployClusterOperatorVerticles(Vertx vertx, KubernetesClient client, RemoteClientSupplier remoteClientSupplier, MetricsProvider metricsProvider, PlatformFeaturesAvailability pfa, ClusterOperatorConfig config, ShutdownHook shutdownHook, Map<String, PlatformFeaturesAvailability> remotePfas, RemoteResourceOperatorSupplier remoteResourceOperatorSupplier) {
+        // Create ResourceOperatorSupplier with remote cluster support
+        // Pass empty map and null if no remote clusters configured
         ResourceOperatorSupplier resourceOperatorSupplier = new ResourceOperatorSupplier(
                 vertx,
                 client,
@@ -166,6 +194,10 @@ public class Main {
                             "0123456789");
 
             kafkaClusterOperations = new KafkaAssemblyOperator(vertx, pfa, certManager, passwordGenerator, resourceOperatorSupplier, config);
+            // Add stretch capabilities if configured
+            if (remoteResourceOperatorSupplier != null) {
+                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remoteResourceOperatorSupplier);
+            }
             kafkaConnectClusterOperations = new KafkaConnectAssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaMirrorMaker2AssemblyOperator = new KafkaMirrorMaker2AssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaBridgeAssemblyOperator = new KafkaBridgeAssemblyOperator(vertx, pfa, certManager, passwordGenerator, resourceOperatorSupplier, config);

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.strimzi.api.kafka.model.podset.StrimziPodSet;
+import io.strimzi.operator.common.Annotations;
 
 import java.util.List;
 import java.util.Map;
@@ -106,5 +107,45 @@ public class PodSetUtils {
     public static boolean isInTerminalState(Pod pod)   {
         return pod.getStatus() != null
                 && ("Failed".equals(pod.getStatus().getPhase()) || "Succeeded".equals(pod.getStatus().getPhase()));
+    }
+
+    /**
+     * Check if the podset is considered "remote" based on specific stretch cluster conditions.
+     * A PodSet is remote if:
+     *
+     * - Stretch cluster env vars (e.g., STRIMZI_REMOTE_KUBE_CONFIG, STRIMZI_CENTRAL_CLUSTER_ID) are NOT configured in the Cluster Operator.
+     * - The PodSet has the `strimzi.io/stretch-cluster-alias` annotation.
+     * - The value of the `strimzi.io/stretch-cluster-alias` annotation does not match the provided central cluster ID.
+     *
+     *
+     * @param podset The StrimziPodSet object to check.
+     * @param isStretchConfigured True if stretch cluster env vars are present and configured in the Cluster Operator.
+     * @param centralClusterId The ID of the central cluster from the environment/configuration.
+     *
+     * @return True if the PodSet is identified as remote under these conditions, false otherwise.
+     */
+    public static boolean isRemotePodSet(StrimziPodSet podset, boolean isStretchConfigured, String centralClusterId) {
+        // Condition 1: Stretch env vars are NOT configured
+        if (isStretchConfigured) {
+            return false;
+        }
+
+        // Condition 2: Stretch cluster alias is defined in PodSet annotation
+        if (!Annotations.hasAnnotation(podset, Annotations.ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS)) {
+            return false;
+        }
+
+        // Condition 3: Central cluster ID does not match Stretch cluster alias
+        // We retrieve the alias only if we've confirmed it exists.
+        String stretchClusterAlias = ModelUtils.getTargetClusterAlias(podset);
+
+        // At this point, stretchClusterAlias is guaranteed not to be null because Annotations.hasAnnotation returned true,
+        // and ModelUtils.getTargetClusterAlias returns null only if the annotation isn't found.
+        // Ensure centralClusterId is not null before comparison to prevent NPE.
+        if (centralClusterId == null) {
+            return true;
+        }
+
+        return !stretchClusterAlias.equals(centralClusterId);
     }
 }

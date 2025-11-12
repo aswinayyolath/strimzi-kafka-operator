@@ -78,6 +78,9 @@ We also control imports only in production classes and not in tests. This is con
         <allow class="io.strimzi.operator.cluster.ClusterOperatorConfig" />
         <allow class="io.strimzi.operator.cluster.PlatformFeaturesAvailability" />
 
+        <!-- Stretch cluster networking providers -->
+        <allow pkg="io.strimzi.operator.cluster.stretch" />
+
         <!-- Other Strimzi projects -->
         <allow pkg="io.strimzi.kafka.oauth" />
     </subpackage>

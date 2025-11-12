@@ -141,7 +141,8 @@ public class ClusterCa extends Ca {
             nodes,
             subjectFn,
             existingCertificates,
-            isMaintenanceTimeWindowsSatisfied
+            isMaintenanceTimeWindowsSatisfied,
+            null
         );
     }
 
@@ -168,16 +169,22 @@ public class ClusterCa extends Ca {
             Set<NodeRef> nodes,
             Set<String> externalBootstrapAddresses,
             Map<Integer, Set<String>> externalAddresses,
-            boolean isMaintenanceTimeWindowsSatisfied
+            boolean isMaintenanceTimeWindowsSatisfied,
+            String targetClusterId
     ) throws IOException {
         Function<NodeRef, Subject> subjectFn = node -> {
             Subject.Builder subject = new Subject.Builder()
                     .withOrganizationName("io.strimzi")
                     .withCommonName(KafkaResources.kafkaComponentName(clusterName));
 
+            if (targetClusterId != null) {
+                subject.addDnsNames(ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.bootstrapServiceName(clusterName)));
+                subject.addDnsNames(ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(clusterName)));
+                subject.addDnsName(DnsNameGenerator.podDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
+            }
+
             subject.addDnsNames(ModelUtils.generateAllServiceDnsNames(namespace, KafkaResources.bootstrapServiceName(clusterName)));
             subject.addDnsNames(ModelUtils.generateAllServiceDnsNames(namespace, KafkaResources.brokersServiceName(clusterName)));
-
             subject.addDnsName(DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
             subject.addDnsName(DnsNameGenerator.podDnsNameWithoutClusterDomain(namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
 
@@ -215,7 +222,8 @@ public class ClusterCa extends Ca {
             nodes,
             subjectFn,
             existingCertificates,
-            isMaintenanceTimeWindowsSatisfied
+            isMaintenanceTimeWindowsSatisfied,
+            targetClusterId
         );
     }
 
@@ -239,11 +247,36 @@ public class ClusterCa extends Ca {
      * @throws IOException Throws IOException when working with files fails
      */
     /* test */ Map<String, CertAndKey> maybeCopyOrGenerateCerts(
+        Reconciliation reconciliation,
+        Set<NodeRef> nodes,
+        Function<NodeRef, Subject> subjectFn,
+        Map<String, CertAndKey> existingCertificates,
+        boolean isMaintenanceTimeWindowsSatisfied
+    ) throws IOException {
+        return maybeCopyOrGenerateCerts(reconciliation, nodes, subjectFn, existingCertificates, isMaintenanceTimeWindowsSatisfied);
+    }
+
+    /**
+     * Copy already existing certificates from based on number of effective replicas
+     * and maybe generate new ones for new replicas (i.e. scale-up).
+     *
+     * @param reconciliation                        Reconciliation marker
+     * @param nodes                                 List of nodes for which the certificates should be generated
+     * @param subjectFn                             Function to generate certificate subject for given node / pod
+     * @param existingCertificates                  Existing certificates (or null if they do not exist yet)
+     * @param isMaintenanceTimeWindowsSatisfied     Flag indicating if we are inside a maintenance window or not
+     *
+     * @return Returns map with node certificates which can be used to create or update the stored certificates
+     *
+     * @throws IOException Throws IOException when working with files fails
+     */
+    /* test */ Map<String, CertAndKey> maybeCopyOrGenerateCerts(
             Reconciliation reconciliation,
             Set<NodeRef> nodes,
             Function<NodeRef, Subject> subjectFn,
             Map<String, CertAndKey> existingCertificates,
-            boolean isMaintenanceTimeWindowsSatisfied
+            boolean isMaintenanceTimeWindowsSatisfied,
+            String targetClusterId
     ) throws IOException {
         // Maps for storing the certificates => will be used in the new or updated certificate store. This map is filled in this method and returned at the end.
         Map<String, CertAndKey> certs = new HashMap<>();
@@ -255,6 +288,9 @@ public class ClusterCa extends Ca {
         File brokerKeyStoreFile = Files.createTempFile("tls", "broker-p12").toFile();
 
         for (NodeRef node : nodes)  {
+            if (ModelUtils.clusterIdExistsButNotEquals(targetClusterId, node.clusterId()))
+                continue;
+
             String podName = node.podName();
             Subject subject = subjectFn.apply(node);
             CertAndKey certAndKey = Optional.ofNullable(existingCertificates)

@@ -27,7 +27,7 @@ import java.util.List;
 )
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({ "conditions", "observedGeneration", "listeners", "kafkaNodePools", "registeredNodeIds", "clusterId",
-    "operatorLastSuccessfulVersion", "kafkaVersion", "kafkaMetadataVersion", "kafkaMetadataState", "autoRebalance" })
+    "operatorLastSuccessfulVersion", "kafkaVersion", "kafkaMetadataVersion", "kafkaMetadataState", "autoRebalance", "stretchCluster" })
 @EqualsAndHashCode(callSuper = true)
 @ToString(callSuper = true)
 public class KafkaStatus extends Status {
@@ -41,6 +41,7 @@ public class KafkaStatus extends Status {
     private String kafkaMetadataVersion;
     private KafkaMetadataState kafkaMetadataState;
     private KafkaAutoRebalanceStatus autoRebalance;
+    private StretchClusterStatus stretchCluster;
 
     @Description("Addresses of the internal and external listeners")
     public List<ListenerStatus> getListeners() {
@@ -125,5 +126,15 @@ public class KafkaStatus extends Status {
 
     public void setAutoRebalance(KafkaAutoRebalanceStatus autoRebalance) {
         this.autoRebalance = autoRebalance;
+    }
+
+
+    @Description("Status of the stretch cluster deployment. Only present when the cluster is deployed in stretch mode across multiple Kubernetes clusters.")
+    public StretchClusterStatus getStretchCluster() {
+        return stretchCluster;
+    }
+
+    public void setStretchCluster(StretchClusterStatus stretchCluster) {
+        this.stretchCluster = stretchCluster;
     }
 }

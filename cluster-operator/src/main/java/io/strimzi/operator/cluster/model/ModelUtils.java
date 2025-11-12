@@ -21,6 +21,8 @@ import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.strimzi.api.kafka.model.common.CertificateAuthority;
 import io.strimzi.api.kafka.model.kafka.Storage;
+import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
+import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.ReconciliationLogger;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.InvalidResourceException;
@@ -33,6 +35,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * ModelUtils is a utility class that holds generic static helper functions
@@ -320,6 +323,32 @@ public class ModelUtils {
     }
 
     /**
+     * Generates all possible DNS names for a Kubernetes service:
+     *     - service-name
+     *     - service-name.namespace
+     *     - service-name.namespace.svc
+     *     - cluster-id.service-name.namespace.svc.clusterset.local
+     *
+     * @param namespace     Namespace of the service
+     * @param serviceName   Name of the service
+     * @param clusterId     Cluster Id where the service is deployed
+     *
+     * @return  List with all possible DNS names
+     */
+    public static List<String> generateAllServiceDnsNameWithClusterId(String clusterId, String namespace, String serviceName)    {
+        DnsNameGenerator kafkaDnsGenerator = DnsNameGenerator.of(clusterId, namespace, serviceName);
+
+        List<String> dnsNames = new ArrayList<>(4);
+
+        dnsNames.add(serviceName);
+        dnsNames.add(String.format("%s.%s", serviceName, namespace));
+        dnsNames.add(kafkaDnsGenerator.serviceDnsNameWithoutClusterDomain());
+        dnsNames.add(kafkaDnsGenerator.serviceDnsName());
+
+        return dnsNames;
+    }
+
+    /**
      * Validate cpu and memory resources.
      * Early resources validation avoids triggering any pod operation with invalid configuration.
      * 
@@ -374,5 +403,43 @@ public class ModelUtils {
             }
         }
         return errors;
+    }
+
+    /**
+     * Retrieves target cluster alias from the strimzi.io/stretch-cluster-alias annotation.
+     *
+     * @param resource The custom resource which might have the stretch-cluster-alias annotation
+     * @return The alias that identifies the specified target Kubernetes cluster
+     */
+    public static String getTargetClusterAlias(HasMetadata resource) {
+        return Annotations.stringAnnotation(resource, Annotations.ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS, null);
+    }
+
+    /**
+     * Returns a distinct list of target cluster ids from the given kafka pools
+     *
+     * @param pools             The KafkaPool object being validated.
+     *
+     * @return Distinct list of target cluster Ids from nodepools
+     */
+    public static List<String> getUniqueTargetClusterIdsFromKafkaPools(List<KafkaNodePool> pools) {
+        return pools.stream()
+                    .map(pool -> getTargetClusterAlias(pool))
+                    .distinct()
+                    .collect(Collectors.toList());
+    }
+
+    /**
+     * Checks whether the given cluster ID exists (is non-null and non-empty) and is different from the target cluster ID.
+     *
+     * @param clusterId         The base cluster ID to compare.
+     * @param targetClusterId   The cluster ID to compare against.
+     *
+     * @return                  true if clusterId is non-null, non-empty, and not equal to targetClusterId.
+     */
+    public static boolean clusterIdExistsButNotEquals(String clusterId, String targetClusterId) {
+        return Optional.ofNullable(clusterId)
+                    .filter(id -> !id.isEmpty() && !id.equals(targetClusterId))
+                    .isPresent();
     }
 }

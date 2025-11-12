@@ -5,11 +5,15 @@
 package io.strimzi.operator.cluster.operator.assembly;
 
 import io.fabric8.kubernetes.api.model.ConfigMap;
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.Node;
+import io.fabric8.kubernetes.api.model.OwnerReference;
+import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.rbac.ClusterRoleBinding;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.strimzi.api.kafka.model.common.Condition;
@@ -17,6 +21,8 @@ import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaMetadataState;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.KafkaStatus;
+import io.strimzi.api.kafka.model.kafka.StretchClusterStatus;
+import io.strimzi.api.kafka.model.kafka.StretchClusterStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatus;
 import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.cruisecontrol.KafkaAutoRebalanceStatus;
@@ -51,6 +57,7 @@ import io.strimzi.operator.cluster.operator.resource.KafkaAgentClientProvider;
 import io.strimzi.operator.cluster.operator.resource.KafkaRoller;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.AbstractNamespacedResourceOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ClusterRoleBindingOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.CrdOperator;
@@ -78,6 +85,7 @@ import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.NodeUtils;
 import io.strimzi.operator.common.model.StatusDiff;
+import io.strimzi.operator.common.model.StatusUtils;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -87,6 +95,7 @@ import org.apache.kafka.common.KafkaException;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -109,7 +118,7 @@ import static io.strimzi.operator.common.Annotations.ANNO_STRIMZI_SERVER_CERT_HA
  * reconciliation pipeline (although the steps for listener reconciliation are outsourced to the KafkaListenerReconciler)
  * and is also used to store the state between them.
  */
-@SuppressWarnings({"checkstyle:ClassFanOutComplexity"})
+@SuppressWarnings({"checkstyle:ClassFanOutComplexity", "checkstyle:ClassDataAbstractionCoupling"})
 public class KafkaReconciler {
     private static final ReconciliationLogger LOGGER = ReconciliationLogger.create(KafkaReconciler.class.getName());
 
@@ -126,6 +135,7 @@ public class KafkaReconciler {
 
     // Objects used during the reconciliation
     /* test */ final Reconciliation reconciliation;
+    private final Kafka kafkaCr; // Kafka custom resource
     private final KafkaCluster kafka;
     private final List<KafkaNodePool> kafkaNodePoolCrs;
     private final ClusterCa clusterCa;
@@ -152,6 +162,19 @@ public class KafkaReconciler {
     private final AdminClientProvider adminClientProvider;
     private final KafkaAgentClientProvider kafkaAgentClientProvider;
 
+    // Stretch cluster support (optional - only set when stretch mode is enabled)
+    /* test */ Map<String, ServiceAccountOperator> stretchServiceAccountOperators;
+    /* test */ Map<String, StrimziPodSetOperator> stretchStrimziPodsetOperators;
+    /* test */ Map<String, PodOperator> stretchPodOperators;
+    /* test */ Map<String, SecretOperator> stretchSecretOperators;
+    /* test */ Map<String, ConfigMapOperator> stretchConfigMapOperators;
+    /* test */ Map<String, PvcOperator> stretchPvcOperators;
+    /* test */ Map<String, StorageClassOperator> stretchStorageClassOperators;
+    /* test */ Map<String, ClusterRoleBindingOperator> stretchClusterRoleBindingOperators;
+    /* test */ io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider;
+    /* test */ io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier;
+    /* test */ io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteSupplier;
+
     // State of the reconciliation => these objects might change during the reconciliation (the collection objects are
     // marked as final, but their contents is modified during the reconciliation)
     private final Set<String> fsResizingRestartRequest = new HashSet<>();
@@ -163,6 +186,15 @@ public class KafkaReconciler {
     /* test */ KafkaListenersReconciler.ReconciliationResult listenerReconciliationResults; // Result of the listener reconciliation with the listener details
 
     private final KafkaAutoRebalanceStatus kafkaAutoRebalanceStatus;
+    private final Map<String, List<String>> stretchSecretsToDelete = new HashMap<>();
+
+    // Stretch cluster state
+    private io.strimzi.operator.cluster.stretch.StretchClusterValidator validator;
+
+    /* test */ boolean isStretchMode;
+    /* test */ String stretchCentralClusterId;
+    /* test */ Set<String> remoteClusterIds;
+    /* test */ List<String> clusterIds;
 
     /**
      * Constructs the Kafka reconciler
@@ -191,6 +223,7 @@ public class KafkaReconciler {
             Vertx vertx
     ) {
         this.reconciliation = reconciliation;
+        this.kafkaCr = kafkaCr;
         this.vertx = vertx;
         this.operationTimeoutMs = config.getOperationTimeoutMs();
         this.kafkaNodePoolCrs = nodePools;
@@ -227,6 +260,675 @@ public class KafkaReconciler {
 
         this.adminClientProvider = supplier.adminClientProvider;
         this.kafkaAgentClientProvider = supplier.kafkaAgentClientProvider;
+    }
+
+    /**
+     * Sets up stretch cluster configuration. This method should be called after construction
+     * if stretch cluster mode is enabled.
+     *
+     * @param remoteResourceOperatorSupplier    Supplier for remote cluster operators
+     * @param networkingProvider                Networking provider for stretch clusters
+     * @param centralClusterId                  ID of the central cluster
+     * @param centralSupplier                   Supplier for central cluster operators
+     */
+    public void setupStretchClusterConfig(
+            io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier,
+            io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider,
+            String centralClusterId,
+            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier) {
+
+        // Get target clusters from node pools
+        this.remoteClusterIds = new HashSet<>();
+        this.clusterIds = new ArrayList<>();
+        clusterIds.add(centralClusterId);
+
+        for (KafkaNodePool pool : kafkaNodePoolCrs) {
+            if (pool.getMetadata().getAnnotations() != null) {
+                String alias = pool.getMetadata().getAnnotations()
+                    .get("strimzi.io/stretch-cluster-alias");
+                if (alias != null && !alias.isEmpty() && !clusterIds.contains(alias)) {
+                    clusterIds.add(alias);
+                    remoteClusterIds.add(alias);
+                }
+            }
+        }
+
+        this.validator = new io.strimzi.operator.cluster.stretch.StretchClusterValidator(vertx, centralClusterId, remoteClusterIds);
+
+
+        // Store suppliers for use in stretch listener reconciler
+        this.centralSupplier = centralSupplier;
+        this.remoteSupplier = remoteResourceOperatorSupplier;
+
+        // Set up operator maps for remote clusters
+        this.stretchServiceAccountOperators = new HashMap<>();
+        this.stretchStrimziPodsetOperators = new HashMap<>();
+        this.stretchPodOperators = new HashMap<>();
+        this.stretchSecretOperators = new HashMap<>();
+        this.stretchConfigMapOperators = new HashMap<>();
+        this.stretchPvcOperators = new HashMap<>();
+        this.stretchStorageClassOperators = new HashMap<>();
+        this.stretchClusterRoleBindingOperators = new HashMap<>();
+
+        // Populate maps from remote supplier
+        for (String clusterId : remoteResourceOperatorSupplier.remoteResourceOperators.keySet()) {
+            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier supplier =
+                remoteResourceOperatorSupplier.get(clusterId);
+
+            stretchServiceAccountOperators.put(clusterId, supplier.serviceAccountOperations);
+            stretchStrimziPodsetOperators.put(clusterId, supplier.strimziPodSetOperator);
+            stretchPodOperators.put(clusterId, supplier.podOperations);
+            stretchSecretOperators.put(clusterId, supplier.secretOperations);
+            stretchConfigMapOperators.put(clusterId, supplier.configMapOperations);
+            stretchPvcOperators.put(clusterId, supplier.pvcOperations);
+            stretchStorageClassOperators.put(clusterId, supplier.storageClassOperations);
+            stretchClusterRoleBindingOperators.put(clusterId, supplier.clusterRoleBindingOperator);
+        }
+
+        this.networkingProvider = networkingProvider;
+        this.isStretchMode = true;
+        this.stretchCentralClusterId = centralClusterId;
+    }
+
+        /**
+         * Handle validation errors by updating Kafka CR status with error details.
+         *
+         * @param reconciliation Reconciliation context
+         * @param kafka Kafka CR
+         * @param result Validation result containing error details
+         * @return Future with KafkaStatus containing error condition
+         */
+    private Future<Void> handleValidationError(
+            KafkaStatus status,
+            io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result) {
+
+        LOGGER.errorOp("{}: Stretch cluster validation failed: {}", 
+            reconciliation, result.getErrorMessage());
+
+        io.strimzi.api.kafka.model.common.Condition condition = 
+            new io.strimzi.api.kafka.model.common.ConditionBuilder()
+                .withType("Ready")
+                .withStatus("False")
+                .withReason(result.getErrorCode())
+                .withMessage(result.getErrorMessage())
+                .withLastTransitionTime(StatusUtils.iso8601Now())
+                .build();
+
+        status.setConditions(List.of(condition));
+        status.setObservedGeneration(kafkaCr.getMetadata().getGeneration());
+
+        return Future.succeededFuture();
+    }
+
+    /**
+     * Helper method to select the appropriate PodOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return PodOperator for the cluster
+     */
+    private PodOperator selectPodOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return podOperator;
+        }
+        return stretchPodOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate PodOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return PodOperator for the cluster
+     */
+    private ClusterRoleBindingOperator selectClusterRoleBindingOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return clusterRoleBindingOperator;
+        }
+        return stretchClusterRoleBindingOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate StrimziPodSetOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return StrimziPodSetOperator for the cluster, or null if cluster ID is invalid
+     */
+    private StrimziPodSetOperator selectStrimziPodSetOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return strimziPodSetOperator;
+        }
+        StrimziPodSetOperator operator = stretchStrimziPodsetOperators.get(clusterId);
+        if (operator == null) {
+            LOGGER.warnCr(reconciliation, "Invalid cluster ID: {}. This cluster ID is not configured in STRIMZI_REMOTE_KUBE_CONFIG", clusterId);
+        }
+        return operator;
+    }
+
+    /**
+     * Helper method to select the appropriate SecretOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return SecretOperator for the cluster
+     */
+    private SecretOperator selectSecretOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return secretOperator;
+        }
+        return stretchSecretOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate ConfigMapOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return ConfigMapOperator for the cluster
+     */
+    private ConfigMapOperator selectConfigMapOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return configMapOperator;
+        }
+        return stretchConfigMapOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate ServiceAccountOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return ServiceAccountOperator for the cluster
+     */
+    private ServiceAccountOperator selectServiceAccountOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return serviceAccountOperator;
+        }
+        return stretchServiceAccountOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate PvcOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return PvcOperator for the cluster
+     */
+    private PvcOperator selectPvcOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return pvcOperator;
+        }
+        return stretchPvcOperators.get(clusterId);
+    }
+
+    /**
+     * Helper method to select the appropriate StorageClassOperator for a cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return StorageClassOperator for the cluster
+     */
+    private StorageClassOperator selectStorageClassOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return storageClassOperator;
+        }
+        return stretchStorageClassOperators.get(clusterId);
+    }
+
+    /**
+     * Updates owner references for resources in remote clusters to use StrimziPodSet as owner.
+     * This enables automatic cleanup when the Kafka CR is deleted from the central cluster.
+     *
+     * When Kafka CR is deleted from central cluster:
+     * 1. Central cluster resources are deleted by Kubernetes GC (they have Kafka CR as owner)
+     * 2. We delete StrimziPodSets in remote clusters
+     * 3. Remote cluster resources are deleted by Kubernetes GC (they have StrimziPodSet as owner)
+     *
+     * @return Future which completes when owner references are updated
+     */
+    protected Future<Void> stretchUpdateOwnerReferences() {
+        List<Future<Void>> futures = new ArrayList<>();
+        String namespace = reconciliation.namespace();
+
+        // Update owner references for each remote cluster
+        for (String clusterId : remoteClusterIds) {
+            // Get the StrimziPodSet name for this cluster
+            String podSetName = getPodSetNameForCluster(clusterId);
+            ConfigMapOperator cmOp = selectConfigMapOperator(clusterId);
+            SecretOperator secretOp = selectSecretOperator(clusterId);
+
+            if (podSetName == null) {
+                LOGGER.warnCr(reconciliation, "No StrimziPodSet found for cluster {}, skipping owner reference update", clusterId);
+                continue;
+            }
+
+            // Update ServiceAccount owner
+            futures.add(updateResourceOwner(
+                selectServiceAccountOperator(clusterId),
+                namespace,
+                KafkaResources.kafkaComponentName(reconciliation.name()),
+                podSetName,
+                clusterId,
+                "ServiceAccount"
+            )
+                .compose(i -> {
+                    LOGGER.infoOp("Updating ConfigMaps at {} with owner reference {}", clusterId, podSetName);
+                    List<Future<?>> configMapFutures = new ArrayList<>();
+                    cmOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                            .compose(configmaps -> {
+                                for (ConfigMap cm : configmaps) {
+                                    LOGGER.infoOp("Updating ConfigMaps {}", cm.getMetadata().getName());
+                                    configMapFutures.add(updateResourceOwner(
+                                        cmOp,
+                                        namespace,
+                                        cm.getMetadata().getName(),
+                                        podSetName,
+                                        clusterId,
+                                        "ConfigMap"
+                                    ));
+                                }
+                                return Future.succeededFuture().mapEmpty();
+                            });
+                    return Future.join(configMapFutures).mapEmpty();
+                })
+                .compose(i -> {
+                    List<Future<?>> secretFutures = new ArrayList<>();
+                    LOGGER.infoOp("Updating Secrets at {} with owner reference {}", clusterId, podSetName);
+                    secretOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels().withStrimziComponentType(KafkaCluster.COMPONENT_TYPE))
+                        .compose(secrets -> {
+                            for (Secret secret : secrets) {
+                                LOGGER.infoOp("Updating Secret {}", secret.getMetadata().getName());
+
+                                secretFutures.add(updateResourceOwner(
+                                    secretOp,
+                                    namespace,
+                                    secret.getMetadata().getName(),
+                                    podSetName,
+                                    clusterId,
+                                    "Secret"
+                                ));
+                            }
+                            return Future.succeededFuture().mapEmpty();
+
+
+                        });
+
+                    return Future.join(secretFutures).mapEmpty();
+
+                }));
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Get the StrimziPodSet name for a cluster.
+     */
+    private String getPodSetNameForCluster(String clusterId) {
+        for (KafkaNodePool pool : kafkaNodePoolCrs) {
+            if (pool.getMetadata().getAnnotations() != null) {
+                String alias = pool.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
+                if (clusterId.equals(alias)) {
+                    return kafkaCr.getMetadata().getName() + '-' + pool.getMetadata().getName();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Update owner reference for a single resource to use StrimziPodSet as owner.
+     */
+    private <T extends HasMetadata> Future<Void> updateResourceOwner(
+            AbstractNamespacedResourceOperator<?, T, ?, ?> operator,
+            String namespace,
+            String resourceName,
+            String podSetName,
+            String clusterId,
+            String resourceType) {
+
+        return operator.getAsync(namespace, resourceName)
+            .compose(resource -> {
+                if (resource == null) {
+                    LOGGER.debugCr(reconciliation, "{} {} not found in cluster {}, skipping owner update",
+                        resourceType, resourceName, clusterId);
+                    return Future.succeededFuture();
+                }
+
+                // Check if already has StrimziPodSet owner
+                if (resource.getMetadata().getOwnerReferences() != null) {
+                    boolean hasStrimziPodSetOwner = resource.getMetadata().getOwnerReferences().stream()
+                        .anyMatch(ref -> "StrimziPodSet".equals(ref.getKind()));
+                    if (hasStrimziPodSetOwner) {
+                        LOGGER.debugCr(reconciliation, "{} {} already has StrimziPodSet owner in cluster {}",
+                            resourceType, resourceName, clusterId);
+                        return Future.succeededFuture();
+                    }
+                }
+
+                LOGGER.infoOp("{} {} {} {} {}", namespace, resourceName, podSetName, clusterId, resourceType);
+
+                // Get the StrimziPodSet to get its UID
+                StrimziPodSetOperator podSetOp = selectStrimziPodSetOperator(clusterId);
+                return podSetOp.getAsync(namespace, podSetName)
+                    .compose(podSet -> {
+                        if (podSet == null) {
+                            LOGGER.warnCr(reconciliation, "StrimziPodSet {} not found in cluster {}, cannot set owner for {} {}",
+                                podSetName, clusterId, resourceType, resourceName);
+                            return Future.succeededFuture();
+                        }
+
+                        LOGGER.infoOp("Podset = {}", podSet.getMetadata().getName());
+
+
+                        // Create StrimziPodSet owner reference
+                        OwnerReference podSetOwner = new OwnerReferenceBuilder()
+                            .withApiVersion("core.strimzi.io/v1beta2")
+                            .withKind("StrimziPodSet")
+                            .withName(podSetName)
+                            .withUid(podSet.getMetadata().getUid())
+                            .withController(true)
+                            .withBlockOwnerDeletion(false)
+                            .build();
+
+                        // Update owner references
+                        List<OwnerReference> newOwners = new ArrayList<>();
+                        if (resource.getMetadata().getOwnerReferences() != null) {
+                            // Keep non-StrimziPodSet owners
+                            newOwners.addAll(resource.getMetadata().getOwnerReferences().stream()
+                                .filter(ref -> !"StrimziPodSet".equals(ref.getKind()))
+                                .toList());
+                        }
+                        newOwners.add(podSetOwner);
+                        resource.getMetadata().setOwnerReferences(newOwners);
+
+                        LOGGER.infoOp("New resource with owner reference = {}", resource);
+
+
+                        LOGGER.debugCr(reconciliation, "Setting StrimziPodSet {} as owner for {} {} in cluster {}",
+                            podSetName, resourceType, resourceName, clusterId);
+
+                        LOGGER.infoOp("Setting StrimziPodSet {} as owner for {} {} in cluster {}",
+                            podSetName, resourceType, resourceName, clusterId);
+
+                        return operator.reconcile(reconciliation, namespace, resourceName, resource)
+                            .mapEmpty();
+                    });
+            });
+    }
+
+    /**
+     * Reconciles networking resources for stretch clusters using the networking provider.
+     * This creates ServiceExports and other networking resources needed for cross-cluster communication.
+     *
+     * @return Future which completes when networking resources are reconciled
+     */
+    protected Future<Void> stretchNetworkingResources() {
+        if (!isStretchMode || networkingProvider == null) {
+            return Future.succeededFuture();
+        }
+
+        List<Future<Void>> futures = new ArrayList<>();
+        String namespace = reconciliation.namespace();
+
+        // Create networking resources for each broker in each cluster
+        for (String clusterId : clusterIds) {
+            for (NodeRef node : kafka.nodes()) {
+                if (!node.broker()) {
+                    continue; // Skip controller-only nodes
+                }
+
+                // Extract ports from the broker configuration
+                Map<String, Integer> ports = new HashMap<>();
+
+                // Add standard Kafka ports
+                ports.put("tcp-replication", 9091);
+                ports.put("tcp-ctrlplane", 9090);
+
+                // Add listener ports if configured
+                for (GenericKafkaListener listener : kafka.getListeners()) {
+                    ports.put("tcp-" + listener.getName(), listener.getPort());
+                }
+
+                futures.add(
+                    networkingProvider.createNetworkingResources(
+                        reconciliation,
+                        namespace,
+                        node.podName(),
+                        clusterId,
+                        ports
+                    ).mapEmpty() // Convert to Future<Void>
+                );
+            }
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Manages certificate secrets for stretch clusters by distributing them across all clusters.
+     *
+     * @param clock The clock for supplying the reconciler with the time instant of each reconciliation cycle
+     * @return      Future which completes when secrets are reconciled across all clusters
+     */
+    protected Future<Void> stretchCertificateSecrets(Clock clock) {
+        List<Future<Void>> futures = new ArrayList<>();
+
+        for (String targetClusterId : clusterIds) {
+            SecretOperator secretOp = selectSecretOperator(targetClusterId);
+            boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
+
+            futures.add(
+                secretOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels().withStrimziComponentType(KafkaCluster.COMPONENT_TYPE))
+                    .compose(existingSecrets -> {
+                        List<Secret> clusterSecrets = kafka.generateCertificatesSecrets(
+                                clusterCa, 
+                                clientsCa, 
+                                existingSecrets,
+                                listenerReconciliationResults.bootstrapDnsNames, 
+                                listenerReconciliationResults.brokerDnsNames,
+                                Util.isMaintenanceTimeWindowsSatisfied(
+                                    reconciliation, 
+                                    maintenanceWindows, 
+                                    clock.instant()
+                                ), 
+                                targetClusterId
+                            )
+                            .stream()
+                            .map(secret -> {
+                                // Remove owner references for remote clusters
+                                if (!isCentral) {
+                                    return new io.fabric8.kubernetes.api.model.SecretBuilder(secret)
+                                        .editMetadata()
+                                            .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                                        .endMetadata()
+                                        .build();
+                                }
+                                return secret;
+                            }).toList();
+
+                        // Track secrets to delete for this cluster
+                        List<String> desiredSecretNames = clusterSecrets.stream()
+                            .map(secret -> secret.getMetadata().getName())
+                            .toList();
+
+                        existingSecrets.forEach(secret -> {
+                            String secretName = secret.getMetadata().getName();
+                            if (!desiredSecretNames.contains(secretName) && 
+                                !KafkaResources.kafkaJmxSecretName(reconciliation.name()).equals(secretName)) {
+                                stretchSecretsToDelete.computeIfAbsent(targetClusterId, k -> new ArrayList<>()).add(secretName);
+                            }
+                        });
+
+                        return updateCertificateSecretsForCluster(clusterSecrets, secretOp);
+                    })
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Manages broker configuration ConfigMaps for stretch clusters by distributing them across all clusters.
+     *
+     * @param metricsAndLogging Metrics and logging configuration
+     * @return                  Future which completes when ConfigMaps are reconciled across all clusters
+     */
+    protected Future<Void> stretchPerBrokerKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
+        List<Future<Void>> futures = new ArrayList<>();
+
+        for (String targetClusterId : clusterIds) {
+            ConfigMapOperator configMapOp = selectConfigMapOperator(targetClusterId);
+            boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
+
+            List<ConfigMap> clusterConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
+                metricsAndLogging, 
+                listenerReconciliationResults.advertisedHostnames, 
+                listenerReconciliationResults.advertisedPorts, 
+                targetClusterId
+            );
+
+            LOGGER.infoOp("Desired ConfigMaps =");
+            LOGGER.infoOp(clusterConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
+
+            futures.add(
+                configMapOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                    .compose(existingConfigMaps -> {
+
+                        LOGGER.infoOp("Existing ConfigMaps =");
+                        LOGGER.infoOp(existingConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
+
+                        List<Future<?>> ops = new ArrayList<>();
+
+                        // Delete unwanted ConfigMaps
+                        List<String> desiredNames = new ArrayList<>();
+                        desiredNames.add(KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()));
+                        desiredNames.addAll(clusterConfigMaps.stream().map(cm -> cm.getMetadata().getName()).toList());
+
+                        for (ConfigMap cm : existingConfigMaps) {
+                            if (!desiredNames.contains(cm.getMetadata().getName())) {
+                                ops.add(configMapOp.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
+                            }
+                        }
+
+                        // Create/update ConfigMaps and store hashes
+                        for (ConfigMap cm : clusterConfigMaps) {
+                            String cmName = cm.getMetadata().getName();
+                            int nodeId = ReconcilerUtils.getPodIndexFromPodName(cmName);
+                            KafkaPool pool = kafka.nodePoolForNodeId(nodeId);
+
+                            String nodeConfiguration = "";
+
+                            if (pool.isBroker()) {
+                                nodeConfiguration = listenerReconciliationResults.advertisedHostnames
+                                        .get(nodeId)
+                                        .entrySet()
+                                        .stream()
+                                        .map(kv -> kv.getKey() + "://" + kv.getValue())
+                                        .sorted()
+                                        .collect(Collectors.joining(" "));
+                                nodeConfiguration += listenerReconciliationResults.advertisedPorts
+                                        .get(nodeId)
+                                        .entrySet()
+                                        .stream()
+                                        .map(kv -> kv.getKey() + "://" + kv.getValue())
+                                        .sorted()
+                                        .collect(Collectors.joining(" "));
+                                nodeConfiguration += cm.getData().getOrDefault(KafkaCluster.BROKER_LISTENERS_FILENAME, "");
+                            }
+
+                            KafkaConfiguration kc = KafkaConfiguration.unvalidated(reconciliation, cm.getData().getOrDefault(KafkaCluster.BROKER_CONFIGURATION_FILENAME, ""));
+                            nodeConfiguration += kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString();
+
+                            if (pool.isController() && !pool.isBroker()) {
+                                nodeConfiguration = kc.controllerConfigsWithValues().toString();
+                            }
+
+                            this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
+
+                            LOGGER.infoOp("Reconciling ConfigMap = {}", cmName);
+                            LOGGER.infoOp(cm);
+
+
+                            ops.add(configMapOp.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
+                        }
+
+                        return Future.join(ops).mapEmpty();
+                    })
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+
+    /**
+     * Creates or updates the {@link StrimziPodSet} resources for a stretched Kafka cluster.
+     *
+     * If the Kafka cluster is scaled up, this method reconciles the updated PodSets and waits
+     * for any new Pods to reach the Ready state. The actual startup of new Pods is handled
+     * by the StrimziPodSet controller.
+     *
+     * Scaling down (i.e., Pod removal) is handled separately by the {@code scaleDown()} method.
+     *
+     * Reconciliation is performed per target cluster, and results from all clusters are merged
+     * and returned as a map.
+     *
+     * @param podSets  List of StrimziPodSets to reconcile across all clusters.
+     * @return Future that completes when reconciliation is done and all new Pods (if any) are Ready.
+     */
+    protected Future<Map<String, Map<String, ReconcileResult<StrimziPodSet>>>> stretchPodSet() {
+        Map<String, List<StrimziPodSet>> targetedPodSets = kafka.generateClusteredPodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations, stretchCentralClusterId);
+
+        List<Future<Map<String, ReconcileResult<StrimziPodSet>>>> futures = new ArrayList<>();
+        Map<String, Map<String, ReconcileResult<StrimziPodSet>>> clusteredPodSetDiff = new ConcurrentHashMap<>();
+
+        for (String targetCluster : targetedPodSets.keySet()) {
+            boolean isCentralCluster = targetCluster.equals(stretchCentralClusterId);
+            StrimziPodSetOperator spsOp = selectStrimziPodSetOperator(targetCluster);
+
+            futures.add(
+                spsOp.batchReconcile(
+                    reconciliation,
+                    reconciliation.namespace(),
+                    targetedPodSets.get(targetCluster),
+                    kafka.getSelectorLabels()
+                ).compose(podSetDiff -> {
+                    clusteredPodSetDiff
+                        .computeIfAbsent(
+                            targetCluster, 
+                            k -> new ConcurrentHashMap<String, ReconcileResult<StrimziPodSet>>()
+                        )
+                        .putAll(podSetDiff);
+                    return waitForNewStretchedNodes(targetCluster).map(podSetDiff);
+                }));
+        }
+
+        return Future.join(futures).map(ignored -> clusteredPodSetDiff);
+    }
+
+    /**
+     * Helper method to get the cluster ID for a given node.
+     *
+     * @param node The node reference
+     * @return     The cluster ID for this node
+     */
+    private String getClusterIdForNode(NodeRef node) {
+        // Find the pool for this node
+        KafkaPool pool = kafka.nodePoolForNodeId(node.nodeId());
+        if (pool == null) {
+            return stretchCentralClusterId; // Default to central cluster
+        }
+
+        // Get the cluster ID from the pool's annotation
+        // The pool's component name is in format "clusterName-poolName", so extract just the pool name
+        String poolName = pool.getComponentName().substring(kafka.getComponentName().length() + 1);
+        for (KafkaNodePool knp : kafkaNodePoolCrs) {
+            if (knp.getMetadata().getName().equals(poolName)) {
+                if (knp.getMetadata().getAnnotations() != null) {
+                    String clusterId = knp.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
+                    if (clusterId != null && !clusterId.isEmpty()) {
+                        return clusterId;
+                    }
+                }
+                break;
+            }
+        }
+
+        return stretchCentralClusterId; // Default to central cluster
     }
 
     /**
@@ -271,6 +973,87 @@ public class KafkaReconciler {
                 // This has to run after all possible rolling updates which might move the pods to different nodes
                 .compose(i -> nodePortExternalListenerStatus())
                 .compose(i -> updateKafkaStatus(kafkaStatus));
+    }
+
+    /**
+     * The stretch reconciliation method which triggers the whole stretch reconciliation pipeline.
+     *
+     * @param kafkaStatus   The Kafka Status class for adding conditions to it during the reconciliation
+     * @param clock         The clock for supplying the reconciler with the time instant of each reconciliation cycle.
+     *                      That time is used for checking maintenance windows
+     *
+     * @return              Future which completes when the reconciliation completes
+     */
+    public Future<Void> reconcileStretchedKafka(KafkaStatus kafkaStatus, Clock clock)    {
+        io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult configResult = 
+            validator.validateKafkaConfiguration(kafkaCr, kafkaNodePoolCrs, true);
+
+        if (!configResult.isValid()) {
+            return handleValidationError(kafkaStatus, configResult);
+        }
+
+        return modelWarnings(kafkaStatus)
+            .compose(i -> initClientAuthenticationCertificates())
+            .compose(i -> manualPodCleaning())
+            .compose(i -> networkPolicy())
+            .compose(i -> updateKafkaAutoRebalanceStatus(kafkaStatus))
+            .compose(i -> stretchManualRollingUpdate())
+            .compose(i -> stretchPvcs(kafkaStatus))
+            .compose(i -> stretchServiceAccount())
+            .compose(i -> stretchInitClusterRoleBinding())
+            .compose(i -> stretchScaleDown())
+            .compose(i -> updateNodePoolStatuses(kafkaStatus))
+            .compose(i -> stretchListeners())
+            .compose(i -> stretchNetworkingResources()) // Networking resources for stretch clusters
+            .compose(i -> stretchCertificateSecrets(clock))
+            .compose(i -> stretchBrokerConfigurationConfigMaps())
+            .compose(i -> jmxSecret())
+            .compose(i -> podDisruptionBudget())
+            .compose(i -> stretchPodSet())
+            .compose(podSetDiffs -> stretchRollingUpdate(podSetDiffs)) 
+            // We pass the PodSet reconciliation result this way to avoid storing it in the instance
+            .compose(i -> stretchUpdateOwnerReferences()) // Update owner references for remote cluster resources
+            .compose(i -> stretchPodsReady())
+            .compose(i -> serviceEndpointsReady())
+            .compose(i -> headlessServiceEndpointsReady())
+            .compose(i -> clusterId(kafkaStatus))
+            // .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
+            .compose(i -> defaultKafkaQuotas())
+            .compose(i -> nodeUnregistration())
+            .compose(i -> metadataVersion(kafkaStatus))
+            .compose(i -> stretchDeletePersistentClaims())
+            .compose(i -> sharedKafkaConfigurationCleanup())
+            .compose(i -> stretchDeleteOldCertificateSecrets())
+            // This has to run after all possible rolling updates which might move the pods to different nodes
+            .compose(i -> nodePortExternalListenerStatus())
+            .compose(i -> updateKafkaStatus(kafkaStatus));
+    }
+
+    /**
+     * Updates the stretch cluster status in the Kafka CR status.
+     *
+     * @param kafkaStatus   The Kafka Status where the stretch cluster status will be set
+     * @return              Completes when the status is updated
+     */
+    protected Future<Void> stretchClusterStatus(final KafkaStatus kafkaStatus) {
+        if (isStretchMode && networkingProvider != null) {
+            StretchClusterStatus stretchStatus = new StretchClusterStatusBuilder()
+                    .withEnabled(true)
+                    .withNetworkingProvider(networkingProvider.getProviderName())
+                    .withCentralClusterId(stretchCentralClusterId)
+                    .withTargetClusters(String.join(", ", clusterIds))
+                    .build();
+
+            kafkaStatus.setStretchCluster(stretchStatus);
+
+            LOGGER.infoCr(reconciliation, "Stretch cluster status updated: provider={}, central={}, clusters={}",
+                    networkingProvider.getProviderName(), stretchCentralClusterId, clusterIds);
+        } else {
+            // Not a stretch cluster - ensure status is null for backward compatibility
+            kafkaStatus.setStretchCluster(null);
+        }
+
+        return Future.succeededFuture();
     }
 
     private Future<Void> updateKafkaAutoRebalanceStatus(KafkaStatus kafkaStatus) {
@@ -345,6 +1128,69 @@ public class KafkaReconciler {
     }
 
     /**
+     * Does manual rolling update of Kafka pods on a stretched kafka cluster based on an annotation on the StrimziPodSet or on the Pods. Annotation
+     * on StrimziPodSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
+     * the selected pods. If the annotation is present on both StrimziPodSet and one or more pods, only one rolling
+     * update of all pods occurs.
+     *
+     * @return  Future with the result of the rolling update
+     */
+    protected Future<Void> stretchManualRollingUpdate() {
+        List<Future<Void>> futures = new ArrayList<>();
+        for (String targetClusterId : clusterIds) {
+            Future<List<NodeRef>> podsToRollThroughPodSetAnno = podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation(targetClusterId);
+            Future<List<NodeRef>> podsToRollThroughPodAnno = podsForManualRollingUpdateDiscoveredThroughPodAnnotations(targetClusterId);
+
+            futures.add(
+                Future
+                .join(podsToRollThroughPodSetAnno, podsToRollThroughPodAnno)
+                .compose(result -> {
+                    // We merge the lists into set to avoid duplicates
+                    Set<NodeRef> nodes = new LinkedHashSet<>();
+                    nodes.addAll(result.resultAt(0));
+                    nodes.addAll(result.resultAt(1));
+
+                    if (!nodes.isEmpty())   {
+                        return maybeRollStretchedKafka(
+                                nodes,
+                                targetClusterId,
+                                pod -> {
+                                    if (pod == null) {
+                                        throw new ConcurrentDeletionException("Unexpectedly pod no longer exists during roll of StrimziPodSet.");
+                                    }
+
+                                    LOGGER.debugCr(reconciliation, "Rolling Kafka pod {} due to manual rolling update annotation", pod.getMetadata().getName());
+
+                                    return RestartReasons.of(RestartReason.MANUAL_ROLLING_UPDATE);
+                                },
+                                // Pass empty advertised hostnames and ports for the nodes
+                                nodes.stream().collect(Collectors.toMap(NodeRef::nodeId, node -> Map.of())),
+                                nodes.stream().collect(Collectors.toMap(NodeRef::nodeId, node -> Map.of())),
+                                false
+                        ).recover(error -> {
+                            LOGGER.warnCr(reconciliation, "Manual rolling update failed (reconciliation will be continued)", error);
+                            return Future.succeededFuture();
+                        });
+                    } else {
+                        return Future.succeededFuture();
+                    }
+                })
+            );
+        }
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Checks all Kafka PodSets and if they have the manual rolling update annotation, it will take all their nodes and
+     * add them to a list for rolling update.
+     *
+     * @return  List with node references to nodes which should be rolled
+     */
+    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation()   {
+        return podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation(null);
+    }
+
+    /**
      * Does manual rolling update of Kafka pods based on an annotation on the StrimziPodSet or on the Pods. Annotation
      * on StrimziPodSet level triggers rolling update of all pods. Annotation on pods triggers rolling update only of
      * the selected pods. If the annotation is present on both StrimziPodSet and one or more pods, only one rolling
@@ -396,8 +1242,15 @@ public class KafkaReconciler {
      *
      * @return  List with node references to nodes which should be rolled
      */
-    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation()   {
-        return strimziPodSetOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodSetAnnotation(String targetClusterId)   {
+        StrimziPodSetOperator operator = targetClusterId != null ? selectStrimziPodSetOperator(targetClusterId) : strimziPodSetOperator;
+
+        if (operator == null) {
+            LOGGER.warnCr(reconciliation, "Cannot list PodSets for cluster {} - operator is null (invalid cluster ID)", targetClusterId);
+            return Future.succeededFuture(Collections.emptyList());
+        }
+
+        return operator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .map(podSets -> {
                     List<NodeRef> nodes = new ArrayList<>();
 
@@ -422,7 +1275,18 @@ public class KafkaReconciler {
      * @return  List with node references to nodes which should be rolled
      */
     private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodAnnotations()   {
-        return podOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+        return podsForManualRollingUpdateDiscoveredThroughPodAnnotations(null);
+    }
+
+    /**
+     * Checks all Kafka Pods and if they have the manual rolling update annotation, it will add them to a list for
+     * rolling update.
+     *
+     * @return  List with node references to nodes which should be rolled
+     */
+    private Future<List<NodeRef>> podsForManualRollingUpdateDiscoveredThroughPodAnnotations(String targetClusterId)   {
+        return (targetClusterId != null ? selectPodOperator(targetClusterId) : podOperator)
+                .listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .map(pods -> {
                     List<NodeRef> nodes = new ArrayList<>();
 
@@ -506,6 +1370,71 @@ public class KafkaReconciler {
     }
 
     /**
+     * Manages PVCs for stretch clusters across all target clusters.
+     *
+     * @param kafkaStatus   Status of the Kafka custom resource where warnings about any issues with resizing will be added
+     * @return  Completes when the PVCs were successfully created or updated in all clusters
+     */
+    protected Future<Void> stretchPvcs(KafkaStatus kafkaStatus) {
+        List<Future<Void>> futures = new ArrayList<>();
+
+        for (String targetClusterId : clusterIds) {
+            List<PersistentVolumeClaim> pvcs = kafka.generatePersistentVolumeClaimsAtCluster(targetClusterId);
+
+            futures.add(
+                new PvcReconciler(reconciliation,
+                    selectPvcOperator(targetClusterId),
+                    selectStorageClassOperator(targetClusterId))
+                    .resizeAndReconcilePvcs(kafkaStatus, pvcs)
+                    .compose(podIdsToRestart -> {
+                        for (Integer podId : podIdsToRestart) {
+                            try {
+                                fsResizingRestartRequest.add(kafka.nodePoolForNodeId(podId).nodeRef(podId).podName());
+                            } catch (KafkaCluster.NodePoolNotFoundException e) {
+                                LOGGER.warnCr(reconciliation, "Node with ID {} does not seem to belong to this Kafka cluster and cannot be marked for restart due to storage resizing", podId);
+                            }
+                        }
+                        return Future.succeededFuture();
+                    })
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Manages the Kafka service account for stretch clusters across all target clusters.
+     *
+     * @return  Completes when the service account was successfully created or updated in all clusters
+     */
+    protected Future<Void> stretchServiceAccount() {
+        List<Future<Void>> futures = new ArrayList<>();
+        ServiceAccount serviceAccount = kafka.generateServiceAccount();
+
+        for (String targetClusterId : clusterIds) {
+            ServiceAccountOperator operator = selectServiceAccountOperator(targetClusterId);
+            ServiceAccount sa = serviceAccount;
+
+            // Remove owner references for remote clusters to avoid cross-cluster ownership issues
+            if (!targetClusterId.equals(stretchCentralClusterId)) {
+                sa = new io.fabric8.kubernetes.api.model.ServiceAccountBuilder(serviceAccount)
+                    .editMetadata()
+                        .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                    .endMetadata()
+                    .build();
+            }
+
+            futures.add(
+                operator.reconcile(reconciliation, reconciliation.namespace(),
+                    KafkaResources.kafkaComponentName(reconciliation.name()), sa)
+                    .mapEmpty()
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
      * Manages the Kafka service account
      *
      * @return  Completes when the service account was successfully created or updated
@@ -514,6 +1443,35 @@ public class KafkaReconciler {
         return serviceAccountOperator
                 .reconcile(reconciliation, reconciliation.namespace(), KafkaResources.kafkaComponentName(reconciliation.name()), kafka.generateServiceAccount())
                 .mapEmpty();
+    }
+
+    /**
+     * Manages the Kafka cluster role binding in a stretchedk kafka cluster. 
+     * When the desired Cluster Role Binding is null, and we get an RBAC error,
+     * we ignore it. This is to allow users to run the operator only inside a namespace when no features requiring
+     * Cluster Role Bindings are needed.
+     *
+     * @return  Completes when the Cluster Role Binding was successfully created or updated
+     */
+    protected Future<Void> stretchInitClusterRoleBinding() {
+        ClusterRoleBinding crb = kafka.generateClusterRoleBinding(reconciliation.namespace());
+        List<Future<Void>> futures = new ArrayList<>();
+        for (String targetClusterId : clusterIds) {
+            ClusterRoleBindingOperator crbOp = selectClusterRoleBindingOperator(targetClusterId);
+            futures.add(
+                ReconcilerUtils.withIgnoreRbacError(
+                    reconciliation,
+                    crbOp
+                        .reconcile(
+                                reconciliation,
+                                KafkaResources.initContainerClusterRoleBindingName(reconciliation.name(), reconciliation.namespace()),
+                                crb
+                        ),
+                    crb
+                ).mapEmpty()
+            );
+        }
+        return Future.join(futures).mapEmpty();
     }
 
     /**
@@ -544,14 +1502,45 @@ public class KafkaReconciler {
      * @return  Future which completes when the scale-down is finished
      */
     protected Future<Void> scaleDown() {
+        return scaleDown(kafka.nodes(), strimziPodSetOperator);
+    }
+
+        /**
+         * Scales down the Stretch Kafka cluster if needed. 
+         *
+         * @return  Future which completes when the scale-down is finished
+         */
+    protected Future<Void> stretchScaleDown() {
+
+        List<Future<Void>> futures = new ArrayList<>();
+
+        for (String targetClusterId : clusterIds) {
+            futures.add(
+                scaleDown(kafka.nodesAtCluster(targetClusterId), selectStrimziPodSetOperator(targetClusterId))
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Scales down the Kafka cluster if needed, given the desired nodes and the
+     * Strimzi Pod Set operator
+     * @param desiredNodes     The end state nodes after a scale down operation
+     * @param spsOp            The Strimzi Pod Set operator object which handles the
+     *                         scale down operation
+     *
+     * @return  Future which completes when the scale-down is finished
+     */
+    protected Future<Void> scaleDown(Set<NodeRef> desiredNodes, StrimziPodSetOperator spsOp) {
         LOGGER.debugCr(reconciliation, "Checking if Kafka scale-down is needed");
 
         Set<String> desiredPodNames = new HashSet<>();
-        for (NodeRef node : kafka.nodes()) {
+        for (NodeRef node : desiredNodes) {
             desiredPodNames.add(node.podName());
         }
 
-        return strimziPodSetOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+        return spsOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .compose(podSets -> {
                     if (podSets == null) {
                         return Future.succeededFuture();
@@ -572,7 +1561,7 @@ public class KafkaReconciler {
                             if (podSet.getSpec().getPods().size() > desiredPods.size())    {
                                 LOGGER.infoCr(reconciliation, "Scaling down Kafka pod set {} from {} to {} replicas", podSet.getMetadata().getName(), podSet.getSpec().getPods().size(), desiredPods.size());
                                 ops.add(
-                                        strimziPodSetOperator
+                                            spsOp
                                                 .reconcile(reconciliation, reconciliation.namespace(), podSet.getMetadata().getName(), scaledDownPodSet)
                                                 .map((Void) null)
                                 );
@@ -604,6 +1593,68 @@ public class KafkaReconciler {
         );
     }
 
+    protected Future<Void> stretchListeners() {
+        return stretchListenerReconciler()
+            .reconcile()
+            .compose(stretchResult -> {
+                // Convert stretch result to standard format
+                listenerReconciliationResults = convertStretchListenerResult(stretchResult);
+                return Future.succeededFuture();
+            });
+    }
+
+    /**
+     * Creates a StretchKafkaListenersReconciler instance for stretch clusters.
+     * This reconciler uses the networking plugin to discover endpoints and generate configuration.
+     *
+     * @return  StretchKafkaListenersReconciler instance
+     */
+    protected io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler stretchListenerReconciler() {
+        // Create StretchKafkaCluster wrapper
+        // Convert KafkaNodePool CRs to KafkaPool models
+        List<KafkaPool> pools = new ArrayList<>();
+        for (NodeRef node : kafka.nodes()) {
+            KafkaPool pool = kafka.nodePoolForNodeId(node.nodeId());
+            if (pool != null && !pools.contains(pool)) {
+                pools.add(pool);
+            }
+        }
+
+        return new io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler(
+                reconciliation,
+                kafkaCr,
+                kafka,
+                kafkaNodePoolCrs,
+                new HashSet<>(clusterIds),
+                stretchCentralClusterId,
+                centralSupplier,
+                remoteSupplier,
+                networkingProvider
+        );
+    }
+
+    /**
+     * Converts StretchKafkaListenersReconciler result to KafkaListenersReconciler result format.
+     *
+     * @param stretchResult Result from stretch listener reconciliation
+     * @return              Converted result in standard format
+     */
+    private KafkaListenersReconciler.ReconciliationResult convertStretchListenerResult(
+            io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler.ListenerReconciliationResult stretchResult) {
+
+        KafkaListenersReconciler.ReconciliationResult result = new KafkaListenersReconciler.ReconciliationResult();
+
+        // Copy plugin-generated data to result
+        result.advertisedHostnames.putAll(stretchResult.getAdvertisedHostnames());
+        result.advertisedPorts.putAll(stretchResult.getAdvertisedPorts());
+        result.bootstrapDnsNames.addAll(stretchResult.getBootstrapDnsNames().values().stream()
+                .flatMap(Set::stream)
+                .collect(Collectors.toSet()));
+        result.brokerDnsNames.putAll(stretchResult.getBrokerDnsNames());
+
+        return result;
+    }
+
     /**
      * Reconciles listeners of this Kafka cluster
      *
@@ -630,7 +1681,8 @@ public class KafkaReconciler {
     protected Future<Void> perBrokerKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
         return configMapOperator.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                 .compose(existingConfigMaps -> {
-                    List<ConfigMap> desiredConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, listenerReconciliationResults.advertisedHostnames, listenerReconciliationResults.advertisedPorts);
+                    List<ConfigMap> desiredConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(metricsAndLogging, listenerReconciliationResults.advertisedHostnames, listenerReconciliationResults.advertisedPorts, null);
+                 
                     List<Future<?>> ops = new ArrayList<>();
 
                     // Delete all existing ConfigMaps which are not desired and are not the shared config map
@@ -714,6 +1766,11 @@ public class KafkaReconciler {
                 .compose(metricsAndLoggingCm -> perBrokerKafkaConfiguration(metricsAndLoggingCm));
     }
 
+    protected Future<Void> stretchBrokerConfigurationConfigMaps() {
+        return MetricsAndLoggingUtils.metricsAndLogging(reconciliation, configMapOperator, kafka.logging(), kafka.metrics())
+            .compose(metricsAndLoggingCm -> stretchPerBrokerKafkaConfiguration(metricsAndLoggingCm));
+    }
+
     /**
      * Manages the Secrets with the node certificates used by the Kafka nodes.
      *
@@ -746,13 +1803,8 @@ public class KafkaReconciler {
      *
      * @return Future that completes when the Secrets have been deleted.
      */
-    protected Future<Void> deleteOldCertificateSecrets() {
-        List<Future<Void>> deleteFutures = secretsToDelete.stream()
-                .map(secretName -> {
-                    LOGGER.debugCr(reconciliation, "Deleting old Secret {}/{} that is no longer used.", reconciliation.namespace(), secretName);
-                    return secretOperator.deleteAsync(reconciliation, reconciliation.namespace(), secretName, false);
-                }).collect(Collectors.toCollection(ArrayList::new)); // We need to collect to mutable list because we might need to add to the list more items later
-
+    protected Future<Void> deleteLegacySecret() {
+        List<Future<Void>> deleteFutures = new ArrayList<>();
         // Remove old Secret containing all certs if it exists
         @SuppressWarnings("deprecation")
         String oldSecretName = KafkaResources.kafkaSecretName(reconciliation.name());
@@ -768,6 +1820,49 @@ public class KafkaReconciler {
     }
 
     /**
+     * Delete old certificate Secrets that are no longer needed.
+     *
+     * @return Future that completes when the Secrets have been deleted.
+     */
+    protected Future<Void> deleteOldCertificateSecrets() {
+        List<Future<Void>> deleteFutures = secretsToDelete.stream()
+                .map(secretName -> {
+                    LOGGER.debugCr(reconciliation, "Deleting old Secret {}/{} that is no longer used.", reconciliation.namespace(), secretName);
+                    return secretOperator.deleteAsync(reconciliation, reconciliation.namespace(), secretName, false);
+                }).collect(Collectors.toCollection(ArrayList::new)); // We need to collect to mutable list because we might need to add to the list more items later
+
+        return Future.join(deleteFutures).compose(x -> deleteLegacySecret());
+    }
+
+    /**
+     * Delete old certificate Secrets that are no longer needed.
+     *
+     * @return Future that completes when the Secrets have been deleted.
+     */
+    protected Future<Void> stretchDeleteOldCertificateSecrets() {
+        List<Future<Void>> deleteFutures = new ArrayList<>();
+
+        for (String targetClusterId : clusterIds) {
+            boolean isCentralCluster = targetClusterId.equals(stretchCentralClusterId);
+
+            List<String> secretsToDelete = stretchSecretsToDelete.get(targetClusterId);
+            if (secretsToDelete != null) {
+                stretchSecretsToDelete.get(targetClusterId)
+                    .forEach(secretName -> {
+                        LOGGER.debugCr(reconciliation, "Deleting old Secret {}/{} that is no longer used.", reconciliation.namespace(), secretName);
+                        deleteFutures.add(
+                            (isCentralCluster ? secretOperator : stretchSecretOperators.get(targetClusterId))
+                                .deleteAsync(reconciliation, reconciliation.namespace(), secretName, false)
+                        );
+                    });
+            }
+
+        }
+
+        return Future.join(deleteFutures).compose(x -> deleteLegacySecret());
+    }
+
+    /**
      * Updates the Secrets with the node certificates used by the Kafka nodes.
      *
      * @param secrets Secrets to update
@@ -775,11 +1870,22 @@ public class KafkaReconciler {
      * @return Future that completes when the Secrets were successfully created or updated
      */
     protected Future<Void> updateCertificateSecrets(List<Secret> secrets) {
+        return updateCertificateSecretsForCluster(secrets, secretOperator);
+    }
+
+    /**
+     * Updates certificate secrets for a specific cluster.
+     *
+     * @param secrets   List of secrets to reconcile
+     * @param secretOp  SecretOperator for the target cluster
+     * @return          Future which completes when secrets are updated
+     */
+    private Future<Void> updateCertificateSecretsForCluster(List<Secret> secrets, SecretOperator secretOp) {
         List<Future<Object>> reconcileFutures = secrets
                 .stream()
                 .map(secret -> {
                     String secretName = secret.getMetadata().getName();
-                    return secretOperator.reconcile(reconciliation, reconciliation.namespace(), secretName, secret)
+                    return secretOp.reconcile(reconciliation, reconciliation.namespace(), secretName, secret)
                             .compose(patchResult -> {
                                 if (patchResult != null) {
                                     kafkaServerCertificateHash.put(
@@ -840,6 +1946,12 @@ public class KafkaReconciler {
             podAnnotations.put(KafkaCluster.ANNO_STRIMZI_CUSTOM_LISTENER_CERT_THUMBPRINTS, listenerReconciliationResults.customListenerCertificateThumbprints.toString());
         }
 
+        // If stretch clusters are enabled, add cluster id as annotation
+        if (node.clusterId() != null  && !node.clusterId().isEmpty()) {
+
+            podAnnotations.put(Annotations.ANNO_STRIMZI_STRETCH_CLUSTER_ALIAS, node.clusterId());
+        }
+
         return podAnnotations;
     }
 
@@ -857,10 +1969,28 @@ public class KafkaReconciler {
                 .batchReconcile(
                         reconciliation,
                         reconciliation.namespace(),
-                        kafka.generatePodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations),
+                        kafka.generatePodSets(pfa.isOpenshift(), imagePullPolicy, imagePullSecrets, this::podSetPodAnnotations, null, null),
                         kafka.getSelectorLabels()
                 )
                 .compose(podSetDiff -> waitForNewNodes().map(podSetDiff));
+    }
+
+    /**
+     * Waits for new nodes (pods) on a target cluster to get into a Ready state
+     *
+     * @return  Future that completes when all the new nodes are ready
+     */
+    private Future<Void> waitForNewStretchedNodes(String targetCluster) {
+        boolean isCentralCluster = targetCluster.equals(stretchCentralClusterId);
+        PodOperator podOp = isCentralCluster ? podOperator : stretchPodOperators.get(targetCluster);
+
+        return ReconcilerUtils
+                .podsReady(
+                        reconciliation,
+                        podOp,
+                        operationTimeoutMs,
+                        kafka.addedNodesAtCluster(targetCluster).stream().map(NodeRef::podName).toList()
+                );
     }
 
     /**
@@ -876,6 +2006,88 @@ public class KafkaReconciler {
                         operationTimeoutMs,
                         kafka.addedNodes().stream().map(NodeRef::podName).toList()
                 );
+    }
+
+    /**
+     * Rolls the Kafka broker Pods (if needed) in a stretched Kafka cluster.
+     *
+     * For each cluster, this method inspects the {@link ReconcileResult} of the associated
+     * {@link StrimziPodSet} to determine if any Pods require a restart (e.g., due to config changes,
+     * file system resizing, or certificate updates).
+     *
+     * Restart logic is delegated to the {@code maybeRollKafka()} method, and is performed per target cluster.
+     *
+     * @param podSetDiffs  Map containing the results of PodSet reconciliation across all clusters.
+     * @return Future that completes when all required broker Pods (across all clusters) have been rolled.
+     */
+    protected Future<Void> stretchRollingUpdate(Map<String, Map<String, ReconcileResult<StrimziPodSet>>> clusteredPodSetDiff) {
+        List<Future<Void>> futures = new ArrayList<>();
+
+        for (Map.Entry<String, Map<String, ReconcileResult<StrimziPodSet>>> entry : clusteredPodSetDiff.entrySet()) {
+            String targetClusterId = entry.getKey();
+            Map<String, ReconcileResult<StrimziPodSet>> podSetDiff = entry.getValue();
+
+            futures.add(maybeRollStretchedKafka(
+                kafka.nodesAtCluster(targetClusterId),
+                targetClusterId,
+                pod -> {
+                    return ReconcilerUtils.reasonsToRestartPod(
+                        reconciliation,
+                        podSetDiff.get(ReconcilerUtils.getControllerNameFromPodName(pod.getMetadata().getName())).resource(),
+                        pod,
+                        fsResizingRestartRequest,
+                        ReconcilerUtils.trackedServerCertChanged(pod, kafkaServerCertificateHash),
+                        clusterCa,
+                        clientsCa
+                    );
+                },
+                listenerReconciliationResults.advertisedHostnames,
+                listenerReconciliationResults.advertisedPorts,
+                true
+            ));
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Rolls Kafka pods in a stretched kafka cluster if needed
+     *
+     * @param nodes                     List of nodes which should be considered for rolling
+     * @param targetClusterId           The cluster id where the rolling is supposed to happen
+     * @param podNeedsRestart           Function which serves as a predicate whether to roll pod or not
+     * @param kafkaAdvertisedHostnames  Map with advertised hostnames required to generate the per-broker configuration
+     * @param kafkaAdvertisedPorts      Map with advertised ports required to generate the per-broker configuration
+     * @param allowReconfiguration      Defines whether the rolling update should also attempt to do dynamic reconfiguration or not
+     *
+     * @return  Future which completes when the rolling is complete
+     */
+    protected Future<Void> maybeRollStretchedKafka(
+            Set<NodeRef> nodes,
+            String targetClusterId,
+            Function<Pod, RestartReasons> podNeedsRestart,
+            Map<Integer, Map<String, String>> kafkaAdvertisedHostnames,
+            Map<Integer, Map<String, String>> kafkaAdvertisedPorts,
+            boolean allowReconfiguration
+    ) {
+        return new KafkaRoller(
+                    reconciliation,
+                    vertx,
+                    selectPodOperator(targetClusterId),
+                    1_000,
+                    operationTimeoutMs,
+                    () -> new BackOff(250, 2, 10),
+                    nodes,
+                    this.coTlsPemIdentity,
+                    adminClientProvider,
+                    kafkaAgentClientProvider,
+                    brokerId -> kafka.generatePerBrokerConfiguration(brokerId, kafkaAdvertisedHostnames, kafkaAdvertisedPorts),
+                    kafka.getKafkaVersion(),
+                    allowReconfiguration,
+                    eventsPublisher
+                )
+                .withStretch(targetClusterId)
+                .rollingRestart(podNeedsRestart);
     }
 
     /**
@@ -916,6 +2128,36 @@ public class KafkaReconciler {
                         operationTimeoutMs,
                         kafka.nodes().stream().map(node -> node.podName()).toList()
                 );
+    }
+
+    /**
+     * Checks whether the Kafka pods in a stretched kafka cluster are ready and 
+     * if not, waits for them to get ready
+     *
+     * @return  Future which completes when all Kafka pods are ready
+     */
+    protected Future<Void> stretchPodsReady() {
+        List<Future<Void>> futures = new ArrayList<>();
+        for (String targetClusterId : clusterIds) {
+            boolean isCentralCluster = targetClusterId.equals(stretchCentralClusterId);
+            PodOperator podOp = isCentralCluster ? podOperator : stretchPodOperators.get(targetClusterId);
+            List<NodeRef> nodes = new ArrayList<>();
+            kafka.getNodePools()
+                .stream()
+                .filter(x -> targetClusterId.equals(x.getTargetCluster()))
+                .forEach(x -> nodes.addAll(x.nodes()));
+
+            futures.add(
+                ReconcilerUtils
+                    .podsReady(
+                            reconciliation,
+                            podOp,
+                            operationTimeoutMs,
+                            nodes.stream().map(node -> node.podName()).toList()
+                    )
+            );
+        }
+        return Future.join(futures).mapEmpty();
     }
 
     /**
@@ -1038,6 +2280,35 @@ public class KafkaReconciler {
      */
     protected Future<Void> metadataVersion(KafkaStatus kafkaStatus) {
         return KRaftMetadataManager.maybeUpdateMetadataVersion(reconciliation, vertx, this.coTlsPemIdentity, adminClientProvider, kafka.getMetadataVersion(), kafkaStatus);
+    }
+
+    /**
+     * Deletion of PVCs after the Stretched Kafka Cluster is deleted is handled by owner reference and garbage collection. However,
+     * this would not help after scale-downs. Therefore, we check if there are any PVCs which should not be present
+     * and delete them when they are.
+     *
+     * This should be called only after the StrimziPodSet reconciliation, rolling update and scale-down when the PVCs
+     * are not used any more by the pods.
+     *
+     * @return  Future which completes when the PVCs which should be deleted are deleted
+     */
+    protected Future<Void> stretchDeletePersistentClaims() {
+        List<Future<Void>> futures = new ArrayList<>();
+        for (String targetClusterId : clusterIds) {
+            PvcOperator pvcOp = selectPvcOperator(targetClusterId);
+            StorageClassOperator storageClassOp = selectStorageClassOperator(targetClusterId);
+            futures.add(
+                pvcOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                .compose(pvcs -> {
+                    List<String> maybeDeletePvcs = pvcs.stream().map(pvc -> pvc.getMetadata().getName()).collect(Collectors.toList());
+                    List<String> desiredPvcs = kafka.generatePersistentVolumeClaimsAtCluster(targetClusterId).stream().map(pvc -> pvc.getMetadata().getName()).collect(Collectors.toList());
+
+                    return new PvcReconciler(reconciliation, pvcOp, storageClassOp)
+                            .deletePersistentClaims(maybeDeletePvcs, desiredPvcs);
+                })
+            );
+        }
+        return Future.join(futures).mapEmpty();
     }
 
     /**

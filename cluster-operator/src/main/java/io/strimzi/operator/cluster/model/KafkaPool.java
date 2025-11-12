@@ -73,6 +73,8 @@ public class KafkaPool extends AbstractModel {
     protected ResourceTemplate templatePerBrokerIngress;
     protected ContainerTemplate templateInitContainer;
 
+    private final String targetCluster;
+
     /**
      * Constructor
      *
@@ -118,6 +120,7 @@ public class KafkaPool extends AbstractModel {
 
         this.poolName = pool.getMetadata().getName();
         this.idAssignment = idAssignment;
+        this.targetCluster = ModelUtils.getTargetClusterAlias(pool);
     }
 
     /**
@@ -290,7 +293,7 @@ public class KafkaPool extends AbstractModel {
      * @return  Node reference created based on the node ID
      */
     public NodeRef nodeRef(int nodeId)  {
-        return new NodeRef(componentName + "-" + nodeId, nodeId, poolName, isController(), isBroker());
+        return new NodeRef(componentName + "-" + nodeId, nodeId, poolName, getTargetCluster(), isController(), isBroker());
     }
 
     /**
@@ -341,5 +344,12 @@ public class KafkaPool extends AbstractModel {
      */
     public Set<Integer> usedToBeBrokerNodes() {
         return idAssignment.usedToBeBroker();
+    }
+
+    /**
+     * @return  the targetCluster where the StrimziPodSet will be deployed
+     */
+    public String getTargetCluster() {
+        return targetCluster;
     }
 }

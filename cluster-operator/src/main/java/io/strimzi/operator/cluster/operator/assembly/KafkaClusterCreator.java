@@ -24,6 +24,7 @@ import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.Reconciliation;
 import io.strimzi.operator.common.ReconciliationLogger;
+import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.model.InvalidResourceException;
 import io.strimzi.operator.common.model.StatusUtils;
 import io.vertx.core.Future;
@@ -46,6 +47,7 @@ public class KafkaClusterCreator {
     private final Reconciliation reconciliation;
     private final KafkaVersion.Lookup versions;
 
+    private final ClusterOperatorConfig config;
     // Operators and other tools
     private final Vertx vertx;
     private final AdminClientProvider adminClientProvider;
@@ -74,6 +76,7 @@ public class KafkaClusterCreator {
     ) {
         this.reconciliation = reconciliation;
         this.versions = config.versions();
+        this.config = config;
 
         this.vertx = vertx;
         this.adminClientProvider = supplier.adminClientProvider;
@@ -163,7 +166,32 @@ public class KafkaClusterCreator {
             Map<String, Storage> oldStorage,
             KafkaVersionChange versionChange
     )   {
-        return Future.succeededFuture(createKafkaCluster(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, versions, sharedEnvironmentProvider));
+        boolean isStretchMode = Util.isStretchModeEnabled(kafkaCr);
+
+        if (isStretchMode && config.isStretchClusterConfigured()) {
+            // Create stretch cluster with multi-cluster configuration
+            return Future.succeededFuture(createStretchKafkaCluster(
+                reconciliation,
+                kafkaCr,
+                nodePoolCrs,
+                oldStorage,
+                versionChange,
+                versions,
+                sharedEnvironmentProvider,
+                config.getCentralClusterId()
+            ));
+        } else {
+            // Create standard cluster
+            return Future.succeededFuture(createKafkaCluster(
+                reconciliation,
+                kafkaCr,
+                nodePoolCrs,
+                oldStorage,
+                versionChange,
+                versions,
+                sharedEnvironmentProvider
+            ));
+        }
     }
 
     /**
@@ -330,5 +358,65 @@ public class KafkaClusterCreator {
         List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, sharedEnvironmentProvider);
         String clusterId = NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs);
         return KafkaCluster.fromCrd(reconciliation, kafkaCr, pools, versions, versionChange, clusterId, sharedEnvironmentProvider);
+    }
+
+    /**
+     * Creates a KafkaCluster model for stretch clusters with multi-cluster configuration.
+     *
+     * @param reconciliation        Reconciliation marker
+     * @param kafkaCr               Kafka custom resource
+     * @param nodePoolCrs           List of KafkaNodePool custom resources
+     * @param oldStorage            Old storage configuration
+     * @param versionChange         Version change descriptor
+     * @param versions              Kafka versions lookup
+     * @param sharedEnvironmentProvider Shared environment provider
+     * @param centralClusterId      ID of the central cluster
+     *
+     * @return  New KafkaCluster object configured for stretch mode
+     */
+    public static KafkaCluster createStretchKafkaCluster(
+            Reconciliation reconciliation,
+            Kafka kafkaCr,
+            List<KafkaNodePool> nodePoolCrs,
+            Map<String, Storage> oldStorage,
+            KafkaVersionChange versionChange,
+            KafkaVersion.Lookup versions,
+            SharedEnvironmentProvider sharedEnvironmentProvider,
+            String centralClusterId
+    ) {
+        // Prepare KafkaPool models
+        List<KafkaPool> pools = NodePoolUtils.createKafkaPools(reconciliation, kafkaCr, nodePoolCrs, oldStorage, versionChange, sharedEnvironmentProvider);
+        String clusterId = NodePoolUtils.getOrGenerateKRaftClusterId(kafkaCr, nodePoolCrs);
+
+        // Extract target cluster IDs from node pool annotations
+        List<String> remoteClusterIds = new ArrayList<>();
+        List<String> clusterIds = new ArrayList<>();
+        clusterIds.add(centralClusterId);
+
+        for (KafkaNodePool pool : nodePoolCrs) {
+            if (pool.getMetadata().getAnnotations() != null) {
+                String alias = pool.getMetadata().getAnnotations()
+                    .get("strimzi.io/stretch-cluster-alias");
+                if (alias != null && !alias.isEmpty() && !clusterIds.contains(alias)) {
+                    clusterIds.add(alias);
+                    if (!alias.equals(centralClusterId)) {
+                        remoteClusterIds.add(alias);
+                    }
+                }
+            }
+        }
+
+        return KafkaCluster.forStretchFromCrd(
+            reconciliation,
+            kafkaCr,
+            pools,
+            versions,
+            versionChange,
+            clusterId,
+            sharedEnvironmentProvider,
+            centralClusterId,
+            remoteClusterIds,
+            clusterIds
+        );
     }
 }

@@ -11,6 +11,7 @@ import io.fabric8.openshift.api.model.Route;
 import io.strimzi.api.kafka.model.common.CertAndKeySecretSource;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListener;
+import io.strimzi.api.kafka.model.kafka.listener.ListenerAddress;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerAddressBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatus;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatusBuilder;
@@ -37,6 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -129,7 +131,44 @@ public class KafkaListenersReconciler {
                 .compose(i -> customListenerCertificates())
                 // This method should be called only after customListenerCertificates
                 .compose(customListenerCertificates -> addCertificatesToListenerStatuses(customListenerCertificates))
-                .compose(i -> Future.succeededFuture(result));
+                .compose(i -> {
+                    List<ListenerStatus> merged = mergeListenerStatuses(result.listenerStatuses);
+                    result.listenerStatuses.clear();
+                    result.listenerStatuses.addAll(merged);
+                    return Future.succeededFuture(result);
+                });
+    }
+
+    private List<ListenerStatus> mergeListenerStatuses(List<ListenerStatus> originalStatuses) {
+        Map<String, ListenerStatusBuilder> mergedMap = new LinkedHashMap<>();
+
+        for (ListenerStatus status : originalStatuses) {
+            String name = status.getName();
+
+            // Use existing builder or create new one
+            ListenerStatusBuilder builder = mergedMap.computeIfAbsent(name, k -> new ListenerStatusBuilder().withName(name));
+
+            // Get existing addresses already set in the builder
+            List<ListenerAddress> existing = builder.build().getAddresses();
+            List<ListenerAddress> mergedAddresses = existing != null ? new ArrayList<>(existing) : new ArrayList<>();
+
+            // Add addresses from the current status
+            if (status.getAddresses() != null) {
+                mergedAddresses.addAll(status.getAddresses());
+            }
+
+            builder.withAddresses(mergedAddresses);
+
+            // Merge certificates: take from status only if builder doesn't already have one
+            if (status.getCertificates() != null && builder.build().getCertificates() == null) {
+                builder.withCertificates(status.getCertificates());
+            }
+        }
+
+        return mergedMap.values()
+                .stream()
+                .map(ListenerStatusBuilder::build)
+                .collect(Collectors.toList());
     }
 
     /**
@@ -154,8 +193,8 @@ public class KafkaListenersReconciler {
      * @return Future which completes when all routes are created or deleted.
      */
     protected Future<Void> routes() {
-        List<Route> routes = new ArrayList<>(kafka.generateExternalBootstrapRoutes());
-        routes.addAll(kafka.generateExternalRoutes());
+        List<Route> routes = new ArrayList<>(kafka.generateExternalBootstrapRoutes(false));
+        routes.addAll(kafka.generateExternalRoutes(null));
 
         if (pfa.hasRoutes()) {
             return routeOperator.batchReconcile(reconciliation, reconciliation.namespace(), routes, kafka.getSelectorLabels()).mapEmpty();
@@ -176,7 +215,7 @@ public class KafkaListenersReconciler {
      */
     protected Future<Void> ingresses() {
         List<Ingress> ingresses = new ArrayList<>(kafka.generateExternalBootstrapIngresses());
-        ingresses.addAll(kafka.generateExternalIngresses());
+        ingresses.addAll(kafka.generateExternalIngresses(null));
 
         return ingressOperator.batchReconcile(reconciliation, reconciliation.namespace(), ingresses, kafka.getSelectorLabels()).mapEmpty();
     }
@@ -329,7 +368,11 @@ public class KafkaListenersReconciler {
             // Set advertised hostnames and ports
             for (NodeRef node : kafka.brokerNodes()) {
                 String brokerServiceName = ListenersUtils.backwardsCompatiblePerBrokerServiceName(ReconcilerUtils.getControllerNameFromPodName(node.podName()), node.nodeId(), listener);
-                String brokerAddress = getInternalServiceHostname(reconciliation.namespace(), brokerServiceName, useServiceDnsDomain);
+                String brokerAddress = getInternalServiceHostname(
+                    reconciliation.namespace(),
+                    brokerServiceName,
+                    useServiceDnsDomain
+                );
                 String userConfiguredAdvertisedHostname = ListenersUtils.brokerAdvertisedHost(listener, node);
 
                 if (listener.isTls()) {

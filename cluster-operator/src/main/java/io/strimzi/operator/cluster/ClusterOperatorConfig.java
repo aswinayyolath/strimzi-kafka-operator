@@ -10,6 +10,7 @@ import io.strimzi.operator.cluster.model.ImagePullPolicy;
 import io.strimzi.operator.cluster.model.KafkaVersion;
 import io.strimzi.operator.cluster.model.NoImageException;
 import io.strimzi.operator.cluster.model.UnsupportedVersionException;
+import io.strimzi.operator.cluster.stretch.StretchClusterConfig;
 import io.strimzi.operator.common.InvalidConfigurationException;
 import io.strimzi.operator.common.Util;
 import io.strimzi.operator.common.config.ConfigParameter;
@@ -128,6 +129,67 @@ public class ClusterOperatorConfig {
      * Enabled or disables the FIPS mode
      */
     public static final String FIPS_MODE = "FIPS_MODE";
+
+    // Stretch cluster configuration
+    /**
+     * Environment variable for configuring remote Kubernetes clusters.
+     */
+    public static final String STRIMZI_REMOTE_KUBE_CONFIG = "STRIMZI_REMOTE_KUBE_CONFIG";
+
+    /**
+     * Environment variable for configuring central kubernetes cluster
+     */
+    public static final String STRIMZI_CENTRAL_CLUSTER_ID = "STRIMZI_CENTRAL_CLUSTER_ID";
+
+    /**
+     * Environment variable for selecting the stretch networking provider
+     */
+    public static final String STRIMZI_STRETCH_NETWORK_PROVIDER = "STRIMZI_STRETCH_NETWORK_PROVIDER";
+
+    /**
+     * Environment variable for specifying the stretch network configuration ConfigMap
+     */
+    public static final String STRIMZI_STRETCH_NETWORK_CONFIG_MAP = "STRIMZI_STRETCH_NETWORK_CONFIG_MAP";
+
+    /**
+     * Environment variable for specifying custom plugin class name
+     */
+    public static final String STRIMZI_STRETCH_PLUGIN_CLASS_NAME = "STRIMZI_STRETCH_PLUGIN_CLASS_NAME";
+
+    /**
+     * Environment variable for specifying custom plugin class path
+     */
+    public static final String STRIMZI_STRETCH_PLUGIN_CLASS_PATH = "STRIMZI_STRETCH_PLUGIN_CLASS_PATH";
+
+    /**
+     * Configuration for remote Kubernetes cluster configs.
+     */
+    public static final ConfigParameter<String> REMOTE_KUBE_CONFIG = new ConfigParameter<>("STRIMZI_REMOTE_KUBE_CONFIG", STRING, null, CONFIG_VALUES);
+
+    /**
+     * Configuration for central cluster id.
+     */
+    public static final ConfigParameter<String> CENTRAL_CLUSTER_ID = new ConfigParameter<>("STRIMZI_CENTRAL_CLUSTER_ID", STRING, null, CONFIG_VALUES);
+
+    /**
+     * Configuration for stretch network provider.
+     */
+    public static final ConfigParameter<String> STRETCH_NETWORK_PROVIDER = new ConfigParameter<>("STRIMZI_STRETCH_NETWORK_PROVIDER", STRING, null, CONFIG_VALUES);
+
+    /**
+     * Configuration for stretch network config map.
+     */
+    public static final ConfigParameter<String> STRETCH_NETWORK_CONFIG_MAP = new ConfigParameter<>("STRIMZI_STRETCH_NETWORK_CONFIG_MAP", STRING, null, CONFIG_VALUES);
+
+    /**
+     * Configuration for custom plugin class name.
+     */
+    public static final ConfigParameter<String> STRETCH_PLUGIN_CLASS_NAME = new ConfigParameter<>("STRIMZI_STRETCH_PLUGIN_CLASS_NAME", STRING, null, CONFIG_VALUES);
+
+    /**
+     * Configuration for custom plugin class path.
+     */
+    public static final ConfigParameter<String> STRETCH_PLUGIN_CLASS_PATH = new ConfigParameter<>("STRIMZI_STRETCH_PLUGIN_CLASS_PATH", STRING, null, CONFIG_VALUES);
 
     // Default values
     /**
@@ -250,6 +312,20 @@ public class ClusterOperatorConfig {
     private final KafkaVersion.Lookup versions;
 
     /**
+     * Stretch cluster configuration (null if stretch is not configured)
+     */
+    private final StretchClusterConfig stretchConfig;
+
+    /**
+     * Gets the Linked Kubernetes cluster details.
+     *
+     * @return Map of remote cluster IDs to their respective Kubernetes configuration info.
+     */
+    public Map<String, ClusterInfo> getRemoteClusters() {
+        return stretchConfig != null ? stretchConfig.getRemoteClusters() : new HashMap<>();
+    }
+
+    /**
      * Logs warnings for removed / deprecated environment variables
      *
      * @param map   map from which loading configuration parameters
@@ -278,9 +354,20 @@ public class ClusterOperatorConfig {
 
     public static ClusterOperatorConfig buildFromMap(Map<String, String> map) {
         warningsForRemovedEndVars(map);
+        StretchClusterConfig.validateConfiguration(map); // Validate stretch config
         KafkaVersion.Lookup lookup = parseKafkaVersions(map.get(STRIMZI_KAFKA_IMAGES), map.get(STRIMZI_KAFKA_CONNECT_IMAGES), map.get(STRIMZI_KAFKA_MIRROR_MAKER_2_IMAGES));
         return buildFromMap(map, lookup);
 
+    }
+
+    /**
+     * Validates that both STRIMZI_REMOTE_KUBE_CONFIG and STRIMZI_CENTRAL_CLUSTER_ID
+     * are set.
+     *
+     * @return boolean indicating if valid stretch cluster configuration is set
+     */
+    public boolean isStretchClusterConfigurationValid() {
+        return stretchConfig != null && stretchConfig.isValid();
     }
 
     /**
@@ -298,6 +385,13 @@ public class ClusterOperatorConfig {
         envMap.keySet().retainAll(ClusterOperatorConfig.keyNames());
 
         Map<String, Object> generatedMap = ConfigParameter.define(envMap, CONFIG_VALUES);
+
+        // Add STRIMZI_REMOTE_KUBE_CONFIG if it's set and not blank
+        String remoteKubeConfig = System.getenv(REMOTE_KUBE_CONFIG.key());
+        if (remoteKubeConfig != null && !remoteKubeConfig.isBlank()) {
+            generatedMap.put(REMOTE_KUBE_CONFIG.key(), remoteKubeConfig);
+        }
+
         return new ClusterOperatorConfig(generatedMap, lookup);
     }
 
@@ -312,6 +406,15 @@ public class ClusterOperatorConfig {
     private ClusterOperatorConfig(Map<String, Object> map, KafkaVersion.Lookup lookup) {
         this.versions = lookup;
         this.map = map;
+
+        // Initialize stretch cluster configuration
+        Map<String, String> envMap = new HashMap<>();
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (entry.getValue() instanceof String) {
+                envMap.put(entry.getKey(), (String) entry.getValue());
+            }
+        }
+        this.stretchConfig = StretchClusterConfig.fromEnvironment(envMap);
     }
 
     /**
@@ -581,6 +684,52 @@ public class ClusterOperatorConfig {
         return get(POD_DISRUPTION_BUDGET_GENERATION);
     }
 
+    /**
+     * @return  Returns the central cluster id for stretch clusters
+     */
+    public String getCentralClusterId() {
+        return stretchConfig != null ? stretchConfig.getCentralClusterId() : null;
+    }
+
+    /**
+     * Checks if stretch cluster configuration is present.
+     * Stretch mode is considered configured when both STRIMZI_CENTRAL_CLUSTER_ID
+     * and STRIMZI_REMOTE_KUBE_CONFIG environment variables are set.
+     *
+     * @return true if both central cluster ID and remote kube config are set
+     */
+    public boolean isStretchClusterConfigured() {
+        return stretchConfig != null && stretchConfig.isValid();
+    }
+
+    /**
+     * @return  Returns the stretch network provider name
+     */
+    public String getStretchNetworkProvider() {
+        return stretchConfig != null ? stretchConfig.getNetworkProvider() : null;
+    }
+
+    /**
+     * @return  Returns the stretch network config map name
+     */
+    public String getStretchNetworkConfigMap() {
+        return stretchConfig != null ? stretchConfig.getNetworkConfigMap() : null;
+    }
+
+    /**
+     * @return  Returns the custom plugin class name
+     */
+    public String getStretchPluginClassName() {
+        return stretchConfig != null ? stretchConfig.getPluginClassName() : null;
+    }
+
+    /**
+     * @return  Returns the custom plugin class path
+     */
+    public String getStretchPluginClassPath() {
+        return stretchConfig != null ? stretchConfig.getPluginClassPath() : null;
+    }
+
     @Override
     public String toString() {
         return "ClusterOperatorConfig{" +
@@ -603,6 +752,10 @@ public class ClusterOperatorConfig {
                 "\n\tpodSecurityProviderClass='" + getPodSecurityProviderClass() + '\'' +
                 "\n\tleaderElectionConfig='" + getLeaderElectionConfig() + '\'' +
                 "\n\tpodDisruptionBudgetGeneration=" + isPodDisruptionBudgetGeneration() +
+                "\n\tremoteClusterConfigs=" + getRemoteClusters() + '\'' +
+                "\n\tcentralClusterId='" + getCentralClusterId() + '\'' +
+                "\n\tstretchNetworkProvider='" + getStretchNetworkProvider() + '\'' +
+                "\n\tstretchClusterConfigured=" + isStretchClusterConfigured() +
                 "}";
     }
 }
