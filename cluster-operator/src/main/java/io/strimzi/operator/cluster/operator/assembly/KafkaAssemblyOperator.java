@@ -787,7 +787,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         Future<ReconciliationState> reconcileKafka(Clock clock)    {
             return kafkaReconciler()
                     .compose(reconciler -> {
-                        if(reconciler.isStretchMode)
+                        if (reconciler.isStretchMode)
                             return reconciler.reconcileStretchedKafka(kafkaStatus, clock);
                         return reconciler.reconcile(kafkaStatus, clock);
                     })

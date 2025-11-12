@@ -2440,10 +2440,10 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     }
 
         /**
-     * Returns the list of KafkaNodePools for this KafkaCluster.
-     *
-     * @return List of KafkaNodePools
-     */
+         * Returns the list of KafkaNodePools for this KafkaCluster.
+         *
+         * @return List of KafkaNodePools
+         */
     public List<KafkaPool> getNodePools() {
         return nodePools;
     }
