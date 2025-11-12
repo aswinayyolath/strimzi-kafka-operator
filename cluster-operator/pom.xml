@@ -257,10 +257,10 @@
             <groupId>io.vertx</groupId>
             <artifactId>vertx-micrometer-metrics</artifactId>
         </dependency>
-        <!-- <dependency>
+        <dependency>
             <groupId>io.fabric8</groupId>
             <artifactId>kubernetes-model-apiextensions</artifactId>
-        </dependency> -->
+        </dependency>
         <dependency>
             <groupId>org.mock-server</groupId>
             <artifactId>mockserver-netty</artifactId>
