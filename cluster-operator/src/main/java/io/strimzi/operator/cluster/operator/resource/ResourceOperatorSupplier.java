@@ -53,7 +53,6 @@ import io.strimzi.operator.common.MetricsProvider;
 import io.vertx.core.Vertx;
 
 import java.lang.reflect.Field;
-import java.util.function.Supplier;
 
 /**
  * Class holding the various resource operator and providers of various clients
