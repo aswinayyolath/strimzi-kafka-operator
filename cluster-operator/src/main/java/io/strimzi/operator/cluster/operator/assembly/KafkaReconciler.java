@@ -21,8 +21,6 @@ import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaMetadataState;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.KafkaStatus;
-import io.strimzi.api.kafka.model.kafka.StretchClusterStatus;
-import io.strimzi.api.kafka.model.kafka.StretchClusterStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatus;
 import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.cruisecontrol.KafkaAutoRebalanceStatus;
@@ -30,6 +28,7 @@ import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListener;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerAddress;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerAddressBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatus;
+import io.strimzi.api.kafka.model.kafka.listener.ListenerStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.quotas.QuotasPluginKafka;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePoolBuilder;
@@ -345,7 +344,8 @@ public class KafkaReconciler {
         LOGGER.errorOp("{}: Stretch cluster validation failed: {}", 
             reconciliation, result.getErrorMessage());
 
-        io.strimzi.api.kafka.model.common.Condition condition = 
+        // Add Ready: False condition
+        io.strimzi.api.kafka.model.common.Condition readyCondition = 
             new io.strimzi.api.kafka.model.common.ConditionBuilder()
                 .withType("Ready")
                 .withStatus("False")
@@ -354,7 +354,17 @@ public class KafkaReconciler {
                 .withLastTransitionTime(StatusUtils.iso8601Now())
                 .build();
 
-        status.setConditions(List.of(condition));
+        // Add StretchCluster: False condition to indicate stretch cluster validation failed
+        io.strimzi.api.kafka.model.common.Condition stretchCondition = 
+            new io.strimzi.api.kafka.model.common.ConditionBuilder()
+                .withType("StretchCluster")
+                .withStatus("False")
+                .withReason("InvalidStretchConfiguration")
+                .withMessage("Stretch cluster validation failed: " + result.getErrorMessage())
+                .withLastTransitionTime(StatusUtils.iso8601Now())
+                .build();
+
+        status.setConditions(List.of(readyCondition, stretchCondition));
         status.setObservedGeneration(kafkaCr.getMetadata().getGeneration());
 
         return Future.succeededFuture();
@@ -1017,7 +1027,7 @@ public class KafkaReconciler {
             .compose(i -> serviceEndpointsReady())
             .compose(i -> headlessServiceEndpointsReady())
             .compose(i -> clusterId(kafkaStatus))
-            // .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
+            .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
             .compose(i -> defaultKafkaQuotas())
             .compose(i -> nodeUnregistration())
             .compose(i -> metadataVersion(kafkaStatus))
@@ -1026,34 +1036,211 @@ public class KafkaReconciler {
             .compose(i -> stretchDeleteOldCertificateSecrets())
             // This has to run after all possible rolling updates which might move the pods to different nodes
             .compose(i -> nodePortExternalListenerStatus())
+            .compose(i -> stretchListenerStatus()) // Populate listener statuses for stretch clusters
             .compose(i -> updateKafkaStatus(kafkaStatus));
     }
 
     /**
-     * Updates the stretch cluster status in the Kafka CR status.
+     * Updates the stretch cluster status in the Kafka CR status using a Condition.
      *
-     * @param kafkaStatus   The Kafka Status where the stretch cluster status will be set
+     * @param kafkaStatus   The Kafka Status where the stretch cluster condition will be added
      * @return              Completes when the status is updated
      */
     protected Future<Void> stretchClusterStatus(final KafkaStatus kafkaStatus) {
         if (isStretchMode && networkingProvider != null) {
-            StretchClusterStatus stretchStatus = new StretchClusterStatusBuilder()
-                    .withEnabled(true)
-                    .withNetworkingProvider(networkingProvider.getProviderName())
-                    .withCentralClusterId(stretchCentralClusterId)
-                    .withTargetClusters(String.join(", ", clusterIds))
-                    .build();
-
-            kafkaStatus.setStretchCluster(stretchStatus);
-
-            LOGGER.infoCr(reconciliation, "Stretch cluster status updated: provider={}, central={}, clusters={}",
-                    networkingProvider.getProviderName(), stretchCentralClusterId, clusterIds);
-        } else {
-            // Not a stretch cluster - ensure status is null for backward compatibility
-            kafkaStatus.setStretchCluster(null);
+            // Add a condition to indicate stretch cluster is active
+            String message = String.format("Stretch cluster active: provider=%s, central=%s, clusters=%s",
+                networkingProvider.getProviderName(),
+                stretchCentralClusterId,
+                String.join(", ", clusterIds));
+    
+            kafkaStatus.addCondition(new Condition() {{
+                    setType("StretchCluster");
+                    setStatus("True");
+                    setReason("StretchClusterActive");
+                    setMessage(message);
+                }});
+    
+            LOGGER.infoCr(reconciliation, "Stretch cluster status condition added: provider={}, central={}, clusters={}", networkingProvider.getProviderName(), stretchCentralClusterId, clusterIds);
         }
 
         return Future.succeededFuture();
+    }
+
+    /**
+     * Populates listener statuses for stretch clusters by querying Routes/Ingresses
+     * for external addresses and using MCS addresses for internal listeners.
+     *
+     * @return Future that completes when listener statuses are populated
+     */
+    protected Future<Void> stretchListenerStatus() {
+        if (!isStretchMode || kafkaCr.getSpec() == null || kafkaCr.getSpec().getKafka() == null 
+                || kafkaCr.getSpec().getKafka().getListeners() == null) {
+            return Future.succeededFuture();
+        }
+
+        List<Future<ListenerStatus>> listenerFutures = new ArrayList<>();
+
+        for (GenericKafkaListener listener : kafkaCr.getSpec().getKafka().getListeners()) {
+            listenerFutures.add(createListenerStatus(listener));
+        }
+
+        return Future.join(listenerFutures)
+                .compose(result -> {
+                    // Add all listener statuses to the reconciliation result
+                    listenerReconciliationResults.listenerStatuses.clear();
+                    for (int i = 0; i < result.size(); i++) {
+                        ListenerStatus status = result.resultAt(i);
+                        if (status != null) {
+                            listenerReconciliationResults.listenerStatuses.add(status);
+                        }
+                    }
+                    return Future.succeededFuture();
+                });
+    }
+
+    /**
+     * Creates a ListenerStatus for a single listener by querying the appropriate
+     * resources (Route, Ingress, or Service) for the address.
+     *
+     * @param listener The listener configuration
+     * @return Future with the ListenerStatus
+     */
+    private Future<ListenerStatus> createListenerStatus(GenericKafkaListener listener) {
+        String listenerName = listener.getName();
+
+        // Determine the listener type and get the appropriate address
+        switch (listener.getType()) {
+            case ROUTE:
+                return getRouteAddress(listener);
+            case INGRESS:
+                return getIngressAddress(listener);
+            case INTERNAL:
+            case CLUSTER_IP:
+                return getInternalAddress(listener);
+            case LOADBALANCER:
+            case NODEPORT:
+                // These are handled by nodePortExternalListenerStatus() or similar
+                // For now, return internal MCS address
+                return getInternalAddress(listener);
+            default:
+                LOGGER.warnCr(reconciliation, "Unknown listener type {} for listener {}", 
+                        listener.getType(), listenerName);
+                return getInternalAddress(listener);
+        }
+    }
+
+    /**
+     * Gets the Route address for a route-type listener.
+     */
+    private Future<ListenerStatus> getRouteAddress(GenericKafkaListener listener) {
+        String bootstrapRouteName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(
+                reconciliation.name(), listener);
+
+        // Query the Route from the central cluster
+        return routeOperator.getAsync(reconciliation.namespace(), bootstrapRouteName)
+                .compose(route -> {
+                    if (route == null || route.getStatus() == null 
+                            || route.getStatus().getIngress() == null 
+                            || route.getStatus().getIngress().isEmpty()) {
+                        LOGGER.warnCr(reconciliation, "Route {} not ready yet, using fallback", bootstrapRouteName);
+                        return getInternalAddress(listener);
+                    }
+
+                    String externalHost = route.getStatus().getIngress().get(0).getHost();
+                    int port = 443; // Routes use HTTPS port
+
+                    ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
+                            .withName(listener.getName())
+                            .withAddresses(new ListenerAddressBuilder()
+                                    .withHost(externalHost)
+                                    .withPort(port)
+                                    .build());
+
+                    if (listener.isTls() && clusterCa != null) {
+                        statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
+                    }
+
+                    return Future.succeededFuture(statusBuilder.build());
+                })
+                .recover(error -> {
+                    LOGGER.warnCr(reconciliation, "Failed to get Route address for listener {}: {}", 
+                            listener.getName(), error.getMessage());
+                    return getInternalAddress(listener);
+                });
+    }
+
+    /**
+     * Gets the Ingress address for an ingress-type listener.
+     */
+    private Future<ListenerStatus> getIngressAddress(GenericKafkaListener listener) {
+        String bootstrapIngressName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(
+                reconciliation.name(), listener);
+
+        return ingressOperator.getAsync(reconciliation.namespace(), bootstrapIngressName)
+                .compose(ingress -> {
+                    if (ingress == null || ingress.getStatus() == null 
+                            || ingress.getStatus().getLoadBalancer() == null 
+                            || ingress.getStatus().getLoadBalancer().getIngress() == null
+                            || ingress.getStatus().getLoadBalancer().getIngress().isEmpty()) {
+                        LOGGER.warnCr(reconciliation, "Ingress {} not ready yet, using fallback", bootstrapIngressName);
+                        return getInternalAddress(listener);
+                    }
+
+                    var ingressStatus = ingress.getStatus().getLoadBalancer().getIngress().get(0);
+                    String externalHost = ingressStatus.getHostname() != null 
+                            ? ingressStatus.getHostname() 
+                            : ingressStatus.getIp();
+
+                    int port = listener.isTls() ? 443 : 80;
+
+                    ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
+                            .withName(listener.getName())
+                            .withAddresses(new ListenerAddressBuilder()
+                                    .withHost(externalHost)
+                                    .withPort(port)
+                                    .build());
+
+                    if (listener.isTls() && clusterCa != null) {
+                        statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
+                    }
+
+                    return Future.succeededFuture(statusBuilder.build());
+                })
+                .recover(error -> {
+                    LOGGER.warnCr(reconciliation, "Failed to get Ingress address for listener {}: {}", 
+                            listener.getName(), error.getMessage());
+                    return getInternalAddress(listener);
+                });
+    }
+
+    /**
+     * Gets the internal MCS address for internal/cluster-ip listeners.
+     */
+    private Future<ListenerStatus> getInternalAddress(GenericKafkaListener listener) {
+        String bootstrapServiceName = KafkaResources.bootstrapServiceName(kafkaCr.getMetadata().getName()) 
+                + "-" + listener.getName();
+        String bootstrapHost = networkingProvider != null 
+                ? networkingProvider.generateServiceDnsName(
+                        reconciliation.namespace(), 
+                        bootstrapServiceName, 
+                        stretchCentralClusterId)
+                : bootstrapServiceName + "." + reconciliation.namespace() + ".svc";
+
+        int port = listener.getPort();
+
+        ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
+                .withName(listener.getName())
+                .withAddresses(new ListenerAddressBuilder()
+                        .withHost(bootstrapHost)
+                        .withPort(port)
+                        .build());
+
+        if (listener.isTls() && clusterCa != null) {
+            statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
+        }
+
+        return Future.succeededFuture(statusBuilder.build());
     }
 
     private Future<Void> updateKafkaAutoRebalanceStatus(KafkaStatus kafkaStatus) {
@@ -1652,6 +1839,8 @@ public class KafkaReconciler {
                 .collect(Collectors.toSet()));
         result.brokerDnsNames.putAll(stretchResult.getBrokerDnsNames());
 
+        // Note: Listener statuses are populated later in stretchListenerStatus()
+        // after Routes/Ingresses are ready and have external addresses
         return result;
     }
 
