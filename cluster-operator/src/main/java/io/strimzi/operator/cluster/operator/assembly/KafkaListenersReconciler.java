@@ -180,6 +180,7 @@ public class KafkaListenersReconciler {
     protected Future<Void> services() {
         List<Service> services = new ArrayList<>();
         services.add(kafka.generateService());
+
         services.add(kafka.generateHeadlessService());
         services.addAll(kafka.generateExternalBootstrapServices());
         services.addAll(kafka.generatePerPodServices());

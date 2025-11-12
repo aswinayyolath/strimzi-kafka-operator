@@ -8,7 +8,6 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.RemoteClientSupplier;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceExportOperator;
 import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.vertx.core.Vertx;
 import io.vertx.micrometer.backends.BackendRegistries;
@@ -38,16 +37,6 @@ import java.util.Map;
  */
 public class RemoteResourceOperatorSupplier {
     private static final Logger LOGGER = LogManager.getLogger(RemoteResourceOperatorSupplier.class);
-
-    /**
-     * Service Export operator of central cluster.
-     */
-    public final ServiceExportOperator centralServiceExportOperator;
-
-    /**
-     * Service Export operators for all clusters (including central).
-     */
-    public final Map<String, ServiceExportOperator> serviceExportOperators = new HashMap<>();
 
     /**
      * Remote resource operator suppliers for each remote cluster.
@@ -82,11 +71,6 @@ public class RemoteResourceOperatorSupplier {
         LOGGER.info("Initializing remote resource operators for {} remote clusters", 
             remoteClientSupplier.getRemoteClients().size());
         
-        // Create ServiceExportOperator for central cluster
-        this.centralServiceExportOperator = new ServiceExportOperator(vertx, centralClient);
-        this.serviceExportOperators.put(centralClusterId, this.centralServiceExportOperator);
-        LOGGER.info("Initialized ServiceExportOperator for central cluster '{}'", centralClusterId);
-        
         // Create operators for each remote cluster
         for (String targetCluster : remoteClientSupplier.getRemoteClients().keySet()) {
             KubernetesClient stretchClient = remoteClientSupplier.getRemoteClient(targetCluster);
@@ -98,9 +82,6 @@ public class RemoteResourceOperatorSupplier {
 
             LOGGER.info("Initializing operators for remote cluster '{}' with API server: {}", 
                 targetCluster, stretchClient.getConfiguration().getMasterUrl());
-
-            // Create ServiceExportOperator for this remote cluster
-            this.serviceExportOperators.put(targetCluster, new ServiceExportOperator(vertx, stretchClient));
 
             // Create full ResourceOperatorSupplier for this remote cluster
             this.remoteResourceOperators.put(
