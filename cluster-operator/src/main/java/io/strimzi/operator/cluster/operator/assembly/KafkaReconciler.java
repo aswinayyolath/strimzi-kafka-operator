@@ -194,6 +194,7 @@ public class KafkaReconciler {
     /* test */ String stretchCentralClusterId;
     /* test */ Set<String> remoteClusterIds;
     /* test */ List<String> clusterIds;
+    /* test */ Map<String, PlatformFeaturesAvailability> remotePfas;
 
     /**
      * Constructs the Kafka reconciler
@@ -269,16 +270,19 @@ public class KafkaReconciler {
      * @param networkingProvider                Networking provider for stretch clusters
      * @param centralClusterId                  ID of the central cluster
      * @param centralSupplier                   Supplier for central cluster operators
+     * @param remotePfas                        Remote platform features availabilities
      */
     public void setupStretchClusterConfig(
             io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier,
             io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider,
             String centralClusterId,
-            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier) {
+            io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier,
+            Map<String, PlatformFeaturesAvailability> remotePfas) {
 
         // Get target clusters from node pools
         this.remoteClusterIds = new HashSet<>();
         this.clusterIds = new ArrayList<>();
+        this.remotePfas = remotePfas;
         clusterIds.add(centralClusterId);
 
         for (KafkaNodePool pool : kafkaNodePoolCrs) {
@@ -621,8 +625,6 @@ public class KafkaReconciler {
                             return Future.succeededFuture();
                         }
 
-                        LOGGER.infoOp("Podset = {}", podSet.getMetadata().getName());
-
 
                         // Create StrimziPodSet owner reference
                         OwnerReference podSetOwner = new OwnerReferenceBuilder()
@@ -645,13 +647,7 @@ public class KafkaReconciler {
                         newOwners.add(podSetOwner);
                         resource.getMetadata().setOwnerReferences(newOwners);
 
-                        LOGGER.infoOp("New resource with owner reference = {}", resource);
-
-
                         LOGGER.debugCr(reconciliation, "Setting StrimziPodSet {} as owner for {} {} in cluster {}",
-                            podSetName, resourceType, resourceName, clusterId);
-
-                        LOGGER.infoOp("Setting StrimziPodSet {} as owner for {} {} in cluster {}",
                             podSetName, resourceType, resourceName, clusterId);
 
                         return operator.reconcile(reconciliation, namespace, resourceName, resource)
@@ -791,9 +787,6 @@ public class KafkaReconciler {
                 targetClusterId
             );
 
-            LOGGER.infoOp("Desired ConfigMaps =");
-            LOGGER.infoOp(clusterConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
-
             futures.add(
                 configMapOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
                     .compose(existingConfigMaps -> {
@@ -848,10 +841,6 @@ public class KafkaReconciler {
                             }
 
                             this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
-
-                            LOGGER.infoOp("Reconciling ConfigMap = {}", cmName);
-                            LOGGER.infoOp(cm);
-
 
                             ops.add(configMapOp.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
                         }
@@ -1782,12 +1771,11 @@ public class KafkaReconciler {
 
     protected Future<Void> stretchListeners() {
         return stretchListenerReconciler()
-            .reconcile()
-            .compose(stretchResult -> {
-                // Convert stretch result to standard format
-                listenerReconciliationResults = convertStretchListenerResult(stretchResult);
-                return Future.succeededFuture();
-            });
+                .stretchReconcile()
+                .compose(result -> {
+                    listenerReconciliationResults = result;
+                    return Future.succeededFuture();
+                });
     }
 
     /**
@@ -1796,52 +1784,24 @@ public class KafkaReconciler {
      *
      * @return  StretchKafkaListenersReconciler instance
      */
-    protected io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler stretchListenerReconciler() {
-        // Create StretchKafkaCluster wrapper
-        // Convert KafkaNodePool CRs to KafkaPool models
-        List<KafkaPool> pools = new ArrayList<>();
-        for (NodeRef node : kafka.nodes()) {
-            KafkaPool pool = kafka.nodePoolForNodeId(node.nodeId());
-            if (pool != null && !pools.contains(pool)) {
-                pools.add(pool);
-            }
-        }
-
-        return new io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler(
+    protected KafkaListenersReconciler stretchListenerReconciler() {
+        return new KafkaListenersReconciler(
                 reconciliation,
-                kafkaCr,
                 kafka,
-                kafkaNodePoolCrs,
-                new HashSet<>(clusterIds),
-                stretchCentralClusterId,
-                centralSupplier,
-                remoteSupplier,
-                networkingProvider
+                clusterCa,
+                pfa,
+                operationTimeoutMs,
+                secretOperator,
+                serviceOperator,
+                routeOperator,
+                ingressOperator
+        ).withStretchConfig(
+            clusterIds,
+            stretchCentralClusterId,
+            remotePfas,
+            remoteSupplier,
+            networkingProvider
         );
-    }
-
-    /**
-     * Converts StretchKafkaListenersReconciler result to KafkaListenersReconciler result format.
-     *
-     * @param stretchResult Result from stretch listener reconciliation
-     * @return              Converted result in standard format
-     */
-    private KafkaListenersReconciler.ReconciliationResult convertStretchListenerResult(
-            io.strimzi.operator.cluster.stretch.StretchKafkaListenersReconciler.ListenerReconciliationResult stretchResult) {
-
-        KafkaListenersReconciler.ReconciliationResult result = new KafkaListenersReconciler.ReconciliationResult();
-
-        // Copy plugin-generated data to result
-        result.advertisedHostnames.putAll(stretchResult.getAdvertisedHostnames());
-        result.advertisedPorts.putAll(stretchResult.getAdvertisedPorts());
-        result.bootstrapDnsNames.addAll(stretchResult.getBootstrapDnsNames().values().stream()
-                .flatMap(Set::stream)
-                .collect(Collectors.toSet()));
-        result.brokerDnsNames.putAll(stretchResult.getBrokerDnsNames());
-
-        // Note: Listener statuses are populated later in stretchListenerStatus()
-        // after Routes/Ingresses are ready and have external addresses
-        return result;
     }
 
     /**

@@ -2333,7 +2333,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     public Map<String, List<Service>> generateClusteredPerPodServices() {
         Map<String, List<Service>> result = new HashMap<>();
 
-        for (String targetClusterId : remoteClusterIds) {
+        for (String targetClusterId : clusterIds) {
             result.put(targetClusterId, generatePerPodServices(targetClusterId));
         }
 
@@ -2349,7 +2349,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     public Map<String, List<Ingress>> generateClusteredExternalIngresses() {
         Map<String, List<Ingress>> result = new HashMap<>();
 
-        for (String targetClusterId : remoteClusterIds) {
+        for (String targetClusterId : clusterIds) {
             result.put(targetClusterId, generateExternalIngresses(targetClusterId));
         }
 
@@ -2365,7 +2365,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     public Map<String, List<Route>> generateClusteredExternalRoutes() {
         Map<String, List<Route>> result = new HashMap<>();
 
-        for (String targetClusterId : remoteClusterIds) {
+        for (String targetClusterId : clusterIds) {
             result.put(targetClusterId, generateExternalRoutes(targetClusterId));
         }
 
