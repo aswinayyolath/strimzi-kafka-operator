@@ -34,6 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 public class ClusterOperatorConfigTest {
 
     private static final Map<String, String> ENV_VARS = new HashMap<>(8);
+
+    private static final String VALID_CLUSTER_A_URL = "https://api.cluster-a.com";
+    private static final String VALID_CLUSTER_B_URL = "https://api.cluster-b.com";
+    private static final String VALID_CLUSTER_A_SECRET = "secret-a";
+    private static final String VALID_CLUSTER_B_SECRET = "secret-b";
+
     static {
         ENV_VARS.put(ClusterOperatorConfig.NAMESPACE.key(), "namespace");
         ENV_VARS.put(ClusterOperatorConfig.FULL_RECONCILIATION_INTERVAL_MS.key(), "30000");
@@ -58,6 +64,7 @@ public class ClusterOperatorConfigTest {
         envVars.remove(ClusterOperatorConfig.FEATURE_GATES.key());
         envVars.remove(ClusterOperatorConfig.POD_SECURITY_PROVIDER_CLASS.key());
         envVars.remove(ClusterOperatorConfig.POD_DISRUPTION_BUDGET_GENERATION.key());
+        envVars.remove(ClusterOperatorConfig.STRIMZI_REMOTE_KUBE_CONFIG);
 
         ClusterOperatorConfig config = ClusterOperatorConfig.buildFromMap(envVars, KafkaVersionTestUtils.getKafkaVersionLookup());
 

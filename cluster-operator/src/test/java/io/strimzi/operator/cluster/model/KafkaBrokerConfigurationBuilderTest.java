@@ -15,6 +15,7 @@ import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationKeycloakBuilder;
 import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationOpaBuilder;
 import io.strimzi.api.kafka.model.kafka.KafkaAuthorizationSimpleBuilder;
 import io.strimzi.api.kafka.model.kafka.KafkaClusterSpecBuilder;
+import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.PersistentClaimStorageBuilder;
 import io.strimzi.api.kafka.model.kafka.SingleVolumeStorage;
 import io.strimzi.api.kafka.model.kafka.Storage;
@@ -65,7 +66,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @SuppressWarnings("checkstyle:classdataabstractioncoupling")
 public class KafkaBrokerConfigurationBuilderTest {
-    private final static NodeRef NODE_REF = new NodeRef("my-cluster-kafka-2", 2, "kafka", false, true);
+    private final static String CLUSTER = "my-cluster";
+    private final static int NODE_ID = 2;
+    private final static String POOL = "kafka";
+    private final static NodeRef NODE_REF = new NodeRef(KafkaResources.kafkaPodName(CLUSTER, NODE_ID), NODE_ID, POOL, null, false, true);
 
     private final static KafkaVersion KAFKA_VERSION = new KafkaVersion(KafkaVersionTestUtils.LATEST_KAFKA_VERSION, "", false, false, "");
 
