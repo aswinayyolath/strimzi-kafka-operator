@@ -356,6 +356,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         reconcileState.initialStatus()
                 // Validate stretch cluster configuration before creating any resources
                 .compose(state -> state.validateStretchConfiguration())
+                // Create GC ConfigMaps in remote clusters FIRST (before CAs so they can reference it)
+                .compose(state -> state.createGarbageCollectorConfigMaps())
                 // Preparation steps => prepare cluster descriptions, handle CA creation or changes
                 .compose(state -> state.reconcileCas(clock))
                 .compose(state -> state.reconcileRemoteCas(clock))
@@ -569,6 +571,75 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         }
 
         /**
+         * Creates garbage collector ConfigMaps in remote clusters.
+         * These ConfigMaps serve as owner references for all remote resources to enable cascading deletion.
+         * Must be called before reconcileRemoteCas() so CA secrets can reference the GC ConfigMap.
+         *
+         * @return  Future with Reconciliation State
+         */
+        Future<ReconciliationState> createGarbageCollectorConfigMaps() {
+            Set<String> remoteClusterIds = config.getRemoteClusters().keySet();
+            if (remoteClusterIds.isEmpty()) {
+                return Future.succeededFuture(this);
+            }
+
+            List<Future<Void>> futures = new ArrayList<>();
+            
+            for (String targetClusterId : remoteClusterIds) {
+                io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator configMapOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).configMapOperations;
+                String gcConfigMapName = KafkaResources.kafkaComponentName(name) + "-gc";
+
+                // Build the ConfigMap with metadata about managed resources
+                io.fabric8.kubernetes.api.model.ConfigMap gcConfigMap = new io.fabric8.kubernetes.api.model.ConfigMapBuilder()
+                        .withNewMetadata()
+                            .withName(gcConfigMapName)
+                            .withNamespace(namespace)
+                            .withLabels(Labels.forStrimziCluster(name).toMap())
+                            .addToLabels("strimzi.io/kind", "Kafka")
+                            .addToLabels("strimzi.io/cluster", name)
+                            .addToLabels("strimzi.io/component-type", "garbage-collector")
+                            .addToLabels("strimzi.io/remote-cluster", targetClusterId)
+                            .withOwnerReferences(java.util.Collections.emptyList()) // No owner references
+                        .endMetadata()
+                        .withData(java.util.Map.of(
+                            "cluster-id", targetClusterId,
+                            "kafka-cluster", name,
+                            "namespace", namespace,
+                            "purpose", "Garbage collection anchor for remote cluster resources",
+                            "managed-resources", String.join(",",
+                                "StrimziPodSet",
+                                "ServiceAccount",
+                                "Secret",
+                                "ConfigMap",
+                                "Service",
+                                "ServiceExport",
+                                "PersistentVolumeClaim"
+                            )
+                        ))
+                        .build();
+
+                LOGGER.infoCr(reconciliation, "Creating garbage collector ConfigMap {} in remote cluster {}",
+                        gcConfigMapName, targetClusterId);
+
+                futures.add(
+                    configMapOp.reconcile(reconciliation, namespace, gcConfigMapName, gcConfigMap)
+                        .compose(result -> {
+                            LOGGER.infoCr(reconciliation, "Garbage collector ConfigMap {} created in remote cluster {}",
+                                    gcConfigMapName, targetClusterId);
+                            return Future.succeededFuture();
+                        }, error -> {
+                            LOGGER.errorCr(reconciliation, "Failed to create GC ConfigMap {} in remote cluster {}: {}",
+                                    gcConfigMapName, targetClusterId, error.getMessage(), error);
+                            return Future.succeededFuture(); // Continue with other clusters
+                        })
+                );
+            }
+
+            return Future.join(futures).map(this);
+        }
+
+        /**
          * Creates the CaReconciler instance and reconciles the Clients and Cluster CAs. The resulting CAs are stored
          * in the ReconciliationState and used later to reconcile the operands.
          *
@@ -612,6 +683,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     remoteResourceOperatorSupplier.get(targetClusterId).strimziPodSetOperator;
                 PodOperator remotePodOp = 
                     remoteResourceOperatorSupplier.get(targetClusterId).podOperations;
+                io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator remoteConfigMapOp = 
+                    remoteResourceOperatorSupplier.get(targetClusterId).configMapOperations;
                 CaReconciler remoteCaReconciler = new CaReconciler(
                     reconciliation,
                     kafkaAssembly,
@@ -626,6 +699,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     remoteSecretOp,
                     remotePodSetOp,
                     remotePodOp,
+                    remoteConfigMapOp,
                     clusterCa,
                     clientsCa,
                     targetClusterId
@@ -927,9 +1001,9 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      */
     @Override
     protected Future<Boolean> delete(Reconciliation reconciliation) {
-          // Note: Stretch cluster deletion is now handled by the regular deletion flow
-        // Remote resources will be cleaned up by their respective operators
-        Future<Void> stretchDeletion = Future.succeededFuture();
+        // Delete garbage collector ConfigMaps from remote clusters
+        // This will trigger cascading deletion of all remote resources
+        Future<Void> stretchDeletion = deleteGarbageCollectorConfigMaps(reconciliation);
 
         // Then delete the ClusterRoleBinding
         return stretchDeletion
@@ -939,6 +1013,74 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                         null),
                     null))
                 .map(Boolean.FALSE); // Return FALSE since other resources are still deleted by garbage collection
+    }
+
+    /**
+     * Deletes garbage collector ConfigMaps from remote clusters.
+     * This triggers cascading deletion of all remote resources.
+     *
+     * @param reconciliation The reconciliation context
+     * @return Future that completes when all GC ConfigMaps are deleted
+     */
+    private Future<Void> deleteGarbageCollectorConfigMaps(Reconciliation reconciliation) {
+        // Check if this is a stretch cluster using config (not Kafka CR which might be deleted)
+        Set<String> remoteClusterIds = config.getRemoteClusters().keySet();
+        if (remoteClusterIds.isEmpty()) {
+            LOGGER.debugCr(reconciliation, "No remote clusters configured, skipping GC ConfigMap deletion");
+            return Future.succeededFuture();
+        }
+
+        List<Future<Void>> deletionFutures = new ArrayList<>();
+        String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+
+        for (String clusterId : remoteClusterIds) {
+            // Get the ConfigMapOperator for this cluster
+            io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator configMapOp = 
+                    getConfigMapOperatorForCluster(clusterId);
+            
+            if (configMapOp != null) {
+                LOGGER.infoCr(reconciliation, "Deleting garbage collector ConfigMap {} from cluster {}", 
+                        gcConfigMapName, clusterId);
+                
+                deletionFutures.add(
+                    configMapOp.reconcile(reconciliation, reconciliation.namespace(), gcConfigMapName, null)
+                        .compose(result -> {
+                            LOGGER.infoCr(reconciliation, "Garbage collector ConfigMap {} deleted from cluster {}", 
+                                    gcConfigMapName, clusterId);
+                            return Future.succeededFuture();
+                        })
+                );
+            }
+        }
+
+        return Future.join(deletionFutures).mapEmpty();
+    }
+
+    /**
+     * Gets the ConfigMapOperator for a specific cluster.
+     *
+     * @param clusterId The cluster ID
+     * @return ConfigMapOperator for the cluster, or null if not found
+     */
+    private io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator getConfigMapOperatorForCluster(String clusterId) {
+        if (remoteResourceOperatorSupplier == null) {
+            LOGGER.warnOp("Remote resource operator supplier not available, cannot access cluster {}", clusterId);
+            return null;
+        }
+
+        try {
+            ResourceOperatorSupplier remoteOps = remoteResourceOperatorSupplier.get(clusterId);
+            
+            if (remoteOps == null) {
+                LOGGER.warnOp("No remote operators found for cluster {}", clusterId);
+                return null;
+            }
+
+            return remoteOps.configMapOperations;
+        } catch (Exception e) {
+            LOGGER.errorOp("Failed to get ConfigMapOperator for cluster {}", clusterId, e);
+            return null;
+        }
     }
 
     /**

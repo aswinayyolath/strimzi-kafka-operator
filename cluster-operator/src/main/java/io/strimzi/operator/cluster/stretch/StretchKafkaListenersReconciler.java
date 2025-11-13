@@ -4,7 +4,9 @@
  */
 package io.strimzi.operator.cluster.stretch;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.HasMetadata;
+import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
@@ -14,11 +16,11 @@ import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListener;
 import io.strimzi.api.kafka.model.kafka.listener.KafkaListenerType;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
-import io.strimzi.api.kafka.model.podset.StrimziPodSet;
 import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.IngressOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.RouteOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceOperator;
@@ -285,14 +287,14 @@ public final class StretchKafkaListenersReconciler {
                             .endMetadata()
                             .build();
                         
-                        // Then add StrimziPodSet as owner
-                        return addStrimziPodSetOwner(svc, finalPodSetName, finalClusterId);
+                        // Then add GC ConfigMap as owner
+                        return addGCConfigMapOwner(svc, finalClusterId);
                     })
                     .collect(Collectors.toList());
                 
                 LOGGER.infoCr(reconciliation,
-                    "Set StrimziPodSet {} as owner for {} services in remote cluster {}",
-                    podSetName, services.size(), clusterId);
+                    "Set GC ConfigMap as owner for {} services in remote cluster {}",
+                    services.size(), clusterId);
             }
 
             // Batch reconcile all services for this cluster
@@ -359,15 +361,25 @@ public final class StretchKafkaListenersReconciler {
                 "Generated {} routes for cluster {}",
                 routes.size(), clusterId);
 
-            // For remote clusters, remove OwnerReferences
+            // For remote clusters, set GC ConfigMap as owner
             if (!isCentral) {
+                final String finalClusterId = clusterId;
                 routes = routes.stream()
-                    .map(route -> new io.fabric8.openshift.api.model.RouteBuilder(route)
-                        .editMetadata()
-                            .withOwnerReferences()
-                        .endMetadata()
-                        .build())
+                    .map(route -> {
+                        // First remove existing owner references
+                        route = new io.fabric8.openshift.api.model.RouteBuilder(route)
+                            .editMetadata()
+                                .withOwnerReferences()
+                            .endMetadata()
+                            .build();
+                        // Then add GC ConfigMap as owner
+                        return addGCConfigMapOwner(route, finalClusterId);
+                    })
                     .collect(Collectors.toList());
+                
+                LOGGER.infoCr(reconciliation,
+                    "Set GC ConfigMap as owner for {} routes in remote cluster {}",
+                    routes.size(), clusterId);
             }
 
             futures.add(
@@ -430,15 +442,25 @@ public final class StretchKafkaListenersReconciler {
                 "Generated {} ingresses for cluster {}",
                 ingresses.size(), clusterId);
 
-            // For remote clusters, remove OwnerReferences
+            // For remote clusters, set GC ConfigMap as owner
             if (!isCentral) {
+                final String finalClusterId = clusterId;
                 ingresses = ingresses.stream()
-                    .map(ingress -> new io.fabric8.kubernetes.api.model.networking.v1.IngressBuilder(ingress)
-                        .editMetadata()
-                            .withOwnerReferences()
-                        .endMetadata()
-                        .build())
+                    .map(ingress -> {
+                        // First remove existing owner references
+                        ingress = new io.fabric8.kubernetes.api.model.networking.v1.IngressBuilder(ingress)
+                            .editMetadata()
+                                .withOwnerReferences()
+                            .endMetadata()
+                            .build();
+                        // Then add GC ConfigMap as owner
+                        return addGCConfigMapOwner(ingress, finalClusterId);
+                    })
                     .collect(Collectors.toList());
+                
+                LOGGER.infoCr(reconciliation,
+                    "Set GC ConfigMap as owner for {} ingresses in remote cluster {}",
+                    ingresses.size(), clusterId);
             }
 
             futures.add(
@@ -1002,55 +1024,83 @@ public final class StretchKafkaListenersReconciler {
     }
 
     /**
-     * Add StrimziPodSet as owner for resources in remote clusters.
-     * This enables automatic cleanup when StrimziPodSet is deleted.
+     * Add GC ConfigMap as owner reference to a resource in remote clusters.
      *
-     * @param resource The resource to add owner to
-     * @param podSetName Name of the StrimziPodSet
+     * @param resource Resource to add owner to
      * @param clusterId Cluster ID
      * @return Resource with owner reference added
      */
-    private <T extends HasMetadata> T addStrimziPodSetOwner(
+    private <T extends HasMetadata> T addGCConfigMapOwner(
             final T resource,
-            final String podSetName,
             final String clusterId) {
 
-        // Get the StrimziPodSet from the remote cluster to get its UID
-        StrimziPodSetOperator podSetOp = getStrimziPodSetOperatorForCluster(clusterId);
+        // Skip central cluster - no owner reference needed
+        if (clusterId.equals(centralClusterId)) {
+            return resource;
+        }
 
-        if (podSetOp == null) {
+        // Get GC ConfigMap name
+        String gcConfigMapName = kafka.getMetadata().getName() + "-kafka-gc";
+
+        // Get ConfigMapOperator for the cluster
+        ConfigMapOperator configMapOp = getConfigMapOperatorForCluster(clusterId);
+        if (configMapOp == null) {
             LOGGER.warnCr(reconciliation,
-                    "No StrimziPodSetOperator for cluster {}, cannot set owner",
+                    "No ConfigMapOperator for cluster {}, cannot set GC owner",
                     clusterId);
             return resource;
         }
 
-        StrimziPodSet podSet = podSetOp.get(namespace, podSetName);
-
-        if (podSet == null) {
+        // Fetch GC ConfigMap to get its UID
+        ConfigMap gcConfigMap = configMapOp.get(namespace, gcConfigMapName);
+        if (gcConfigMap == null || gcConfigMap.getMetadata().getUid() == null) {
             LOGGER.warnCr(reconciliation,
-                    "StrimziPodSet {} not found in cluster {}, cannot set owner",
-                    podSetName, clusterId);
+                    "GC ConfigMap {} not found or has no UID in cluster {}, cannot set owner",
+                    gcConfigMapName, clusterId);
             return resource;
         }
 
-        // Add OwnerReference
-        resource.getMetadata().setOwnerReferences(List.of(
-                new OwnerReferenceBuilder()
-                        .withApiVersion("core.strimzi.io/v1beta2")
-                        .withKind("StrimziPodSet")
-                        .withName(podSetName)
-                        .withUid(podSet.getMetadata().getUid())
-                        .withController(true)
-                        .withBlockOwnerDeletion(false)
-                        .build()
-        ));
-
+        String gcUid = gcConfigMap.getMetadata().getUid();
+        
+        // Add GC ConfigMap as owner reference
+        OwnerReference gcOwner = new OwnerReferenceBuilder()
+                .withApiVersion("v1")
+                .withKind("ConfigMap")
+                .withName(gcConfigMapName)
+                .withUid(gcUid)
+                .withController(false)
+                .withBlockOwnerDeletion(false)
+                .build();
+        
+        // Add owner reference to resource
+        List<OwnerReference> owners = new ArrayList<>();
+        if (resource.getMetadata().getOwnerReferences() != null) {
+            owners.addAll(resource.getMetadata().getOwnerReferences());
+        }
+        owners.add(gcOwner);
+        resource.getMetadata().setOwnerReferences(owners);
+        
         LOGGER.debugCr(reconciliation,
-                "Set StrimziPodSet {} as owner for {} in cluster {}",
-                podSetName, resource.getMetadata().getName(), clusterId);
-
+                "Added GC ConfigMap {} (UID: {}) as owner for {} {} in cluster {}",
+                gcConfigMapName, gcUid, resource.getKind(), resource.getMetadata().getName(), clusterId);
+        
         return resource;
+    }
+
+    /**
+     * Get ConfigMap operator for a specific cluster.
+     *
+     * @param clusterId Cluster ID
+     * @return ConfigMapOperator or null if not found
+     */
+    private ConfigMapOperator getConfigMapOperatorForCluster(
+            final String clusterId) {
+        if (clusterId.equals(centralClusterId)) {
+            return centralSupplier.configMapOperations;
+        } else {
+            ResourceOperatorSupplier supplier = remoteOperatorSupplier.get(clusterId);
+            return supplier != null ? supplier.configMapOperations : null;
+        }
     }
 
     /**
