@@ -5,6 +5,7 @@
 package io.strimzi.operator.cluster.operator.assembly;
 
 import io.fabric8.kubernetes.api.model.ConfigMap;
+import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.Node;
@@ -56,7 +57,6 @@ import io.strimzi.operator.cluster.operator.resource.KafkaAgentClientProvider;
 import io.strimzi.operator.cluster.operator.resource.KafkaRoller;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
-import io.strimzi.operator.cluster.operator.resource.kubernetes.AbstractNamespacedResourceOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ClusterRoleBindingOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.CrdOperator;
@@ -170,6 +170,7 @@ public class KafkaReconciler {
     /* test */ Map<String, PvcOperator> stretchPvcOperators;
     /* test */ Map<String, StorageClassOperator> stretchStorageClassOperators;
     /* test */ Map<String, ClusterRoleBindingOperator> stretchClusterRoleBindingOperators;
+    /* test */ Map<String, ServiceOperator> stretchServiceOperators;
     /* test */ io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider;
     /* test */ io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier;
     /* test */ io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteSupplier;
@@ -186,6 +187,7 @@ public class KafkaReconciler {
 
     private final KafkaAutoRebalanceStatus kafkaAutoRebalanceStatus;
     private final Map<String, List<String>> stretchSecretsToDelete = new HashMap<>();
+    private final Map<String, String> gcConfigMapUids = new HashMap<>(); // Store GC ConfigMap UIDs by cluster ID
 
     // Stretch cluster state
     private io.strimzi.operator.cluster.stretch.StretchClusterValidator validator;
@@ -308,6 +310,7 @@ public class KafkaReconciler {
         this.stretchPvcOperators = new HashMap<>();
         this.stretchStorageClassOperators = new HashMap<>();
         this.stretchClusterRoleBindingOperators = new HashMap<>();
+        this.stretchServiceOperators = new HashMap<>();
 
         // Populate maps from remote supplier
         for (String clusterId : remoteResourceOperatorSupplier.remoteResourceOperators.keySet()) {
@@ -322,6 +325,7 @@ public class KafkaReconciler {
             stretchPvcOperators.put(clusterId, supplier.pvcOperations);
             stretchStorageClassOperators.put(clusterId, supplier.storageClassOperations);
             stretchClusterRoleBindingOperators.put(clusterId, supplier.clusterRoleBindingOperator);
+            stretchServiceOperators.put(clusterId, supplier.serviceOperations);
         }
 
         this.networkingProvider = networkingProvider;
@@ -479,233 +483,16 @@ public class KafkaReconciler {
     }
 
     /**
-     * Updates owner references for resources in remote clusters to use StrimziPodSet as owner.
-     * This enables automatic cleanup when the Kafka CR is deleted from the central cluster.
+     * Helper method to select the appropriate ServiceOperator for a cluster.
      *
-     * When Kafka CR is deleted from central cluster:
-     * 1. Central cluster resources are deleted by Kubernetes GC (they have Kafka CR as owner)
-     * 2. We delete StrimziPodSets in remote clusters
-     * 3. Remote cluster resources are deleted by Kubernetes GC (they have StrimziPodSet as owner)
-     *
-     * @return Future which completes when owner references are updated
+     * @param clusterId The cluster ID
+     * @return ServiceOperator for the cluster
      */
-    protected Future<Void> stretchUpdateOwnerReferences() {
-        List<Future<Void>> futures = new ArrayList<>();
-        String namespace = reconciliation.namespace();
-
-        // Update owner references for each remote cluster
-        for (String clusterId : remoteClusterIds) {
-            // Get the StrimziPodSet name for this cluster
-            String podSetName = getPodSetNameForCluster(clusterId);
-            ConfigMapOperator cmOp = selectConfigMapOperator(clusterId);
-            SecretOperator secretOp = selectSecretOperator(clusterId);
-
-            if (podSetName == null) {
-                LOGGER.warnCr(reconciliation, "No StrimziPodSet found for cluster {}, skipping owner reference update", clusterId);
-                continue;
-            }
-
-            // Update ServiceAccount owner
-            futures.add(updateResourceOwner(
-                selectServiceAccountOperator(clusterId),
-                namespace,
-                KafkaResources.kafkaComponentName(reconciliation.name()),
-                podSetName,
-                clusterId,
-                "ServiceAccount"
-            )
-                .compose(i -> {
-                    LOGGER.infoOp("Updating ConfigMaps at {} with owner reference {}", clusterId, podSetName);
-                    List<Future<?>> configMapFutures = new ArrayList<>();
-                    cmOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
-                            .compose(configmaps -> {
-                                for (ConfigMap cm : configmaps) {
-                                    LOGGER.infoOp("Updating ConfigMaps {}", cm.getMetadata().getName());
-                                    configMapFutures.add(updateResourceOwner(
-                                        cmOp,
-                                        namespace,
-                                        cm.getMetadata().getName(),
-                                        podSetName,
-                                        clusterId,
-                                        "ConfigMap"
-                                    ));
-                                }
-                                return Future.succeededFuture().mapEmpty();
-                            });
-                    return Future.join(configMapFutures).mapEmpty();
-                })
-                .compose(i -> {
-                    List<Future<?>> secretFutures = new ArrayList<>();
-                    LOGGER.infoOp("Updating Secrets at {} with owner reference {}", clusterId, podSetName);
-                    secretOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels().withStrimziComponentType(KafkaCluster.COMPONENT_TYPE))
-                        .compose(secrets -> {
-                            for (Secret secret : secrets) {
-                                LOGGER.infoOp("Updating Secret {}", secret.getMetadata().getName());
-
-                                secretFutures.add(updateResourceOwner(
-                                    secretOp,
-                                    namespace,
-                                    secret.getMetadata().getName(),
-                                    podSetName,
-                                    clusterId,
-                                    "Secret"
-                                ));
-                            }
-                            return Future.succeededFuture().mapEmpty();
-
-
-                        });
-
-                    return Future.join(secretFutures).mapEmpty();
-
-                }));
+    private ServiceOperator selectServiceOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return serviceOperator;
         }
-
-        return Future.join(futures).mapEmpty();
-    }
-
-    /**
-     * Get the StrimziPodSet name for a cluster.
-     */
-    private String getPodSetNameForCluster(String clusterId) {
-        for (KafkaNodePool pool : kafkaNodePoolCrs) {
-            if (pool.getMetadata().getAnnotations() != null) {
-                String alias = pool.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
-                if (clusterId.equals(alias)) {
-                    return kafkaCr.getMetadata().getName() + '-' + pool.getMetadata().getName();
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Update owner reference for a single resource to use StrimziPodSet as owner.
-     */
-    private <T extends HasMetadata> Future<Void> updateResourceOwner(
-            AbstractNamespacedResourceOperator<?, T, ?, ?> operator,
-            String namespace,
-            String resourceName,
-            String podSetName,
-            String clusterId,
-            String resourceType) {
-
-        return operator.getAsync(namespace, resourceName)
-            .compose(resource -> {
-                if (resource == null) {
-                    LOGGER.debugCr(reconciliation, "{} {} not found in cluster {}, skipping owner update",
-                        resourceType, resourceName, clusterId);
-                    return Future.succeededFuture();
-                }
-
-                // Check if already has StrimziPodSet owner
-                if (resource.getMetadata().getOwnerReferences() != null) {
-                    boolean hasStrimziPodSetOwner = resource.getMetadata().getOwnerReferences().stream()
-                        .anyMatch(ref -> "StrimziPodSet".equals(ref.getKind()));
-                    if (hasStrimziPodSetOwner) {
-                        LOGGER.debugCr(reconciliation, "{} {} already has StrimziPodSet owner in cluster {}",
-                            resourceType, resourceName, clusterId);
-                        return Future.succeededFuture();
-                    }
-                }
-
-                LOGGER.infoOp("{} {} {} {} {}", namespace, resourceName, podSetName, clusterId, resourceType);
-
-                // Get the StrimziPodSet to get its UID
-                StrimziPodSetOperator podSetOp = selectStrimziPodSetOperator(clusterId);
-                return podSetOp.getAsync(namespace, podSetName)
-                    .compose(podSet -> {
-                        if (podSet == null) {
-                            LOGGER.warnCr(reconciliation, "StrimziPodSet {} not found in cluster {}, cannot set owner for {} {}",
-                                podSetName, clusterId, resourceType, resourceName);
-                            return Future.succeededFuture();
-                        }
-
-                        LOGGER.infoOp("Podset = {}", podSet.getMetadata().getName());
-
-
-                        // Create StrimziPodSet owner reference
-                        OwnerReference podSetOwner = new OwnerReferenceBuilder()
-                            .withApiVersion("core.strimzi.io/v1beta2")
-                            .withKind("StrimziPodSet")
-                            .withName(podSetName)
-                            .withUid(podSet.getMetadata().getUid())
-                            .withController(true)
-                            .withBlockOwnerDeletion(false)
-                            .build();
-
-                        // Update owner references
-                        List<OwnerReference> newOwners = new ArrayList<>();
-                        if (resource.getMetadata().getOwnerReferences() != null) {
-                            // Keep non-StrimziPodSet owners
-                            newOwners.addAll(resource.getMetadata().getOwnerReferences().stream()
-                                .filter(ref -> !"StrimziPodSet".equals(ref.getKind()))
-                                .toList());
-                        }
-                        newOwners.add(podSetOwner);
-                        resource.getMetadata().setOwnerReferences(newOwners);
-
-                        LOGGER.infoOp("New resource with owner reference = {}", resource);
-
-
-                        LOGGER.debugCr(reconciliation, "Setting StrimziPodSet {} as owner for {} {} in cluster {}",
-                            podSetName, resourceType, resourceName, clusterId);
-
-                        LOGGER.infoOp("Setting StrimziPodSet {} as owner for {} {} in cluster {}",
-                            podSetName, resourceType, resourceName, clusterId);
-
-                        return operator.reconcile(reconciliation, namespace, resourceName, resource)
-                            .mapEmpty();
-                    });
-            });
-    }
-
-    /**
-     * Reconciles networking resources for stretch clusters using the networking provider.
-     * This creates ServiceExports and other networking resources needed for cross-cluster communication.
-     *
-     * @return Future which completes when networking resources are reconciled
-     */
-    protected Future<Void> stretchNetworkingResources() {
-        if (!isStretchMode || networkingProvider == null) {
-            return Future.succeededFuture();
-        }
-
-        List<Future<Void>> futures = new ArrayList<>();
-        String namespace = reconciliation.namespace();
-
-        // Create networking resources for each broker in each cluster
-        for (String clusterId : clusterIds) {
-            for (NodeRef node : kafka.nodes()) {
-                if (!node.broker()) {
-                    continue; // Skip controller-only nodes
-                }
-
-                // Extract ports from the broker configuration
-                Map<String, Integer> ports = new HashMap<>();
-
-                // Add standard Kafka ports
-                ports.put("tcp-replication", 9091);
-                ports.put("tcp-ctrlplane", 9090);
-
-                // Add listener ports if configured
-                for (GenericKafkaListener listener : kafka.getListeners()) {
-                    ports.put("tcp-" + listener.getName(), listener.getPort());
-                }
-
-                futures.add(
-                    networkingProvider.createNetworkingResources(
-                        reconciliation,
-                        namespace,
-                        node.podName(),
-                        clusterId,
-                        ports
-                    ).mapEmpty() // Convert to Future<Void>
-                );
-            }
-        }
-
-        return Future.join(futures).mapEmpty();
+        return stretchServiceOperators.get(clusterId);
     }
 
     /**
@@ -739,11 +526,28 @@ public class KafkaReconciler {
                             )
                             .stream()
                             .map(secret -> {
-                                // Remove owner references for remote clusters
+                                // For remote clusters, replace Kafka CR owner with GC ConfigMap owner
                                 if (!isCentral) {
+                                    String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+                                    String gcUid = gcConfigMapUids.get(targetClusterId);
+                                    
+                                    if (gcUid == null) {
+                                        LOGGER.warnCr(reconciliation, "GC ConfigMap UID not available for cluster {}, skipping owner reference for Secret {}", 
+                                            targetClusterId, secret.getMetadata().getName());
+                                        return secret;
+                                    }
+                                    
                                     return new io.fabric8.kubernetes.api.model.SecretBuilder(secret)
                                         .editMetadata()
-                                            .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                                            .withOwnerReferences((List<OwnerReference>) null)
+                                            .addNewOwnerReference()
+                                                .withApiVersion("v1")
+                                                .withKind("ConfigMap")
+                                                .withName(gcConfigMapName)
+                                                .withUid(gcUid)
+                                                .withController(false)
+                                                .withBlockOwnerDeletion(false)
+                                            .endOwnerReference()
                                         .endMetadata()
                                         .build();
                                 }
@@ -772,6 +576,73 @@ public class KafkaReconciler {
     }
 
     /**
+     * Reconciles networking resources for stretch clusters using the networking provider.
+     * This creates ServiceExports and other networking resources needed for cross-cluster communication.
+     * 
+     * <p>The networking provider is called once per broker node per cluster. The provider is responsible
+     * for creating the necessary resources (e.g., ServiceExports for MCS) and managing their ownership
+     * to ensure proper garbage collection when the Kafka cluster is deleted.</p>
+     *
+     * @return Future which completes when networking resources are reconciled
+     */
+    protected Future<Void> stretchNetworkingResources() {
+        if (!isStretchMode || networkingProvider == null) {
+            return Future.succeededFuture();
+        }
+
+        List<Future<Void>> futures = new ArrayList<>();
+        String namespace = reconciliation.namespace();
+
+        // Build port map once - it's the same for all nodes
+        Map<String, Integer> ports = buildNetworkingPorts();
+
+        // Create networking resources for each broker in each cluster
+        // Note: The plugin may deduplicate internally (e.g., MCS creates one ServiceExport per cluster)
+        for (String clusterId : clusterIds) {
+            for (NodeRef node : kafka.nodes()) {
+                if (!node.broker()) {
+                    continue; // Skip controller-only nodes
+                }
+
+                futures.add(
+                    networkingProvider.createNetworkingResources(
+                        reconciliation,
+                        namespace,
+                        node.podName(),
+                        clusterId,
+                        ports
+                    ).mapEmpty()
+                );
+            }
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Builds the port map for networking resources based on the Kafka cluster configuration.
+     * This includes standard Kafka ports (replication, control plane) and user-configured listeners.
+     *
+     * @return Map of port names to port numbers
+     */
+    private Map<String, Integer> buildNetworkingPorts() {
+        Map<String, Integer> ports = new HashMap<>();
+
+        // Add standard Kafka ports (replication and control plane)
+        // Port names must match those defined in KafkaCluster
+        ports.put("tcp-replication", KafkaCluster.REPLICATION_PORT);
+        ports.put("tcp-ctrlplane", 9090); // CONTROLPLANE_PORT is protected in KafkaCluster
+
+        // Add user-configured listener ports
+        for (GenericKafkaListener listener : kafka.getListeners()) {
+            String portName = "tcp-" + listener.getName();
+            ports.put(portName, listener.getPort());
+        }
+
+        return ports;
+    }
+
+    /**
      * Manages broker configuration ConfigMaps for stretch clusters by distributing them across all clusters.
      *
      * @param metricsAndLogging Metrics and logging configuration
@@ -784,12 +655,20 @@ public class KafkaReconciler {
             ConfigMapOperator configMapOp = selectConfigMapOperator(targetClusterId);
             boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
 
-            List<ConfigMap> clusterConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
+            List<ConfigMap> generatedConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
                 metricsAndLogging, 
                 listenerReconciliationResults.advertisedHostnames, 
                 listenerReconciliationResults.advertisedPorts, 
                 targetClusterId
             );
+
+            // Add GC ConfigMap as owner for remote cluster ConfigMaps
+            final List<ConfigMap> clusterConfigMaps;
+            if (!isCentral) {
+                clusterConfigMaps = addGarbageCollectorOwnerReference(targetClusterId, generatedConfigMaps);
+            } else {
+                clusterConfigMaps = generatedConfigMaps;
+            }
 
             LOGGER.infoOp("Desired ConfigMaps =");
             LOGGER.infoOp(clusterConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
@@ -806,10 +685,13 @@ public class KafkaReconciler {
                         // Delete unwanted ConfigMaps
                         List<String> desiredNames = new ArrayList<>();
                         desiredNames.add(KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()));
+                        desiredNames.add(KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc"); // Don't delete GC ConfigMap
                         desiredNames.addAll(clusterConfigMaps.stream().map(cm -> cm.getMetadata().getName()).toList());
 
                         for (ConfigMap cm : existingConfigMaps) {
                             if (!desiredNames.contains(cm.getMetadata().getName())) {
+                                LOGGER.debugCr(reconciliation, "Deleting unwanted ConfigMap {} in cluster {}", 
+                                        cm.getMetadata().getName(), targetClusterId);
                                 ops.add(configMapOp.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
                             }
                         }
@@ -890,11 +772,18 @@ public class KafkaReconciler {
             boolean isCentralCluster = targetCluster.equals(stretchCentralClusterId);
             StrimziPodSetOperator spsOp = selectStrimziPodSetOperator(targetCluster);
 
+            // Add GC ConfigMap as owner for remote cluster resources
+            List<StrimziPodSet> podSets = targetedPodSets.get(targetCluster);
+            if (!isCentralCluster) {
+                podSets = addGarbageCollectorOwnerReference(targetCluster, podSets);
+            }
+
+            List<StrimziPodSet> finalPodSets = podSets;
             futures.add(
                 spsOp.batchReconcile(
                     reconciliation,
                     reconciliation.namespace(),
-                    targetedPodSets.get(targetCluster),
+                    finalPodSets,
                     kafka.getSelectorLabels()
                 ).compose(podSetDiff -> {
                     clusteredPodSetDiff
@@ -1004,6 +893,7 @@ public class KafkaReconciler {
 
         return modelWarnings(kafkaStatus)
             .compose(i -> initClientAuthenticationCertificates())
+            .compose(i -> stretchGarbageCollectorConfigMap()) // Create garbage collector ConfigMap in remote clusters FIRST
             .compose(i -> manualPodCleaning())
             .compose(i -> networkPolicy())
             .compose(i -> updateKafkaAutoRebalanceStatus(kafkaStatus))
@@ -1022,7 +912,6 @@ public class KafkaReconciler {
             .compose(i -> stretchPodSet())
             .compose(podSetDiffs -> stretchRollingUpdate(podSetDiffs)) 
             // We pass the PodSet reconciliation result this way to avoid storing it in the instance
-            .compose(i -> stretchUpdateOwnerReferences()) // Update owner references for remote cluster resources
             .compose(i -> stretchPodsReady())
             .compose(i -> serviceEndpointsReady())
             .compose(i -> headlessServiceEndpointsReady())
@@ -1602,11 +1491,27 @@ public class KafkaReconciler {
             ServiceAccountOperator operator = selectServiceAccountOperator(targetClusterId);
             ServiceAccount sa = serviceAccount;
 
-            // Remove owner references for remote clusters to avoid cross-cluster ownership issues
+            // For remote clusters, replace Kafka CR owner reference with GC ConfigMap owner reference
             if (!targetClusterId.equals(stretchCentralClusterId)) {
+                String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+                String gcUid = gcConfigMapUids.get(targetClusterId);
+                
+                if (gcUid == null) {
+                    LOGGER.warnCr(reconciliation, "GC ConfigMap UID not available for cluster {}, skipping ServiceAccount creation", targetClusterId);
+                    continue; // Skip this cluster if UID not available
+                }
+                
                 sa = new io.fabric8.kubernetes.api.model.ServiceAccountBuilder(serviceAccount)
                     .editMetadata()
-                        .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                        .withOwnerReferences((List<OwnerReference>) null)
+                        .addNewOwnerReference()
+                            .withApiVersion("v1")
+                            .withKind("ConfigMap")
+                            .withName(gcConfigMapName)
+                            .withUid(gcUid)
+                            .withController(false)
+                            .withBlockOwnerDeletion(false)
+                        .endOwnerReference()
                     .endMetadata()
                     .build();
             }
@@ -1615,6 +1520,100 @@ public class KafkaReconciler {
                 operator.reconcile(reconciliation, reconciliation.namespace(),
                     KafkaResources.kafkaComponentName(reconciliation.name()), sa)
                     .mapEmpty()
+            );
+        }
+
+        return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Creates and manages garbage collector ConfigMaps in remote clusters.
+     * These ConfigMaps serve as owner references for all remote resources,
+     * enabling automatic cleanup when the Kafka CR is deleted from the central cluster.
+     *
+     * @return Completes when the ConfigMaps are created in all remote clusters
+     */
+    protected Future<Void> stretchGarbageCollectorConfigMap() {
+        if (!isStretchMode) {
+            return Future.succeededFuture();
+        }
+
+        List<Future<Void>> futures = new ArrayList<>();
+
+        // Only create in remote clusters (not central)
+        for (String targetClusterId : clusterIds) {
+            if (targetClusterId.equals(stretchCentralClusterId)) {
+                continue; // Skip central cluster
+            }
+
+            ConfigMapOperator operator = selectConfigMapOperator(targetClusterId);
+            String configMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+
+            // Build the ConfigMap with metadata about managed resources
+            // IMPORTANT: No owner references! This ConfigMap must NOT be garbage collected
+            ConfigMap gcConfigMap = new ConfigMapBuilder()
+                    .withNewMetadata()
+                        .withName(configMapName)
+                        .withNamespace(reconciliation.namespace())
+                        .withLabels(kafka.getSelectorLabels().toMap())
+                        .addToLabels("strimzi.io/kind", "Kafka")
+                        .addToLabels("strimzi.io/cluster", reconciliation.name())
+                        .addToLabels("strimzi.io/component-type", "garbage-collector")
+                        .addToLabels("strimzi.io/remote-cluster", targetClusterId)
+                        .withOwnerReferences(Collections.emptyList()) // Explicitly set empty owner references
+                    .endMetadata()
+                    .withData(Map.of(
+                        "cluster-id", targetClusterId,
+                        "kafka-cluster", reconciliation.name(),
+                        "namespace", reconciliation.namespace(),
+                        "purpose", "Garbage collection anchor for remote cluster resources",
+                        "managed-resources", String.join(",",
+                            "StrimziPodSet",
+                            "ServiceAccount",
+                            "Secret",
+                            "ConfigMap",
+                            "Service",
+                            "ServiceExport",
+                            "PersistentVolumeClaim"
+                        )
+                    ))
+                    .build();
+
+            LOGGER.infoCr(reconciliation, "Creating garbage collector ConfigMap {} in cluster {} (owner refs before reconcile: {})",
+                    configMapName, targetClusterId, gcConfigMap.getMetadata().getOwnerReferences());
+
+            futures.add(
+                operator.reconcile(reconciliation, reconciliation.namespace(), configMapName, gcConfigMap)
+                    .compose(result -> {
+                        LOGGER.infoCr(reconciliation, "GC ConfigMap {} reconciled in cluster {}, result: {}",
+                                configMapName, targetClusterId, result);
+                        // Fetch the created ConfigMap to get its UID and verify owner references
+                        return operator.getAsync(reconciliation.namespace(), configMapName);
+                    })
+                    .compose(createdConfigMap -> {
+                        if (createdConfigMap != null) {
+                            LOGGER.infoCr(reconciliation, "GC ConfigMap {} fetched from cluster {}, owner refs: {}",
+                                    configMapName, targetClusterId, createdConfigMap.getMetadata().getOwnerReferences());
+                            
+                            if (createdConfigMap.getMetadata().getUid() != null) {
+                                // Store the UID for later use in owner references
+                                gcConfigMapUids.put(targetClusterId, createdConfigMap.getMetadata().getUid());
+                                LOGGER.infoCr(reconciliation, "Garbage collector ConfigMap {} created in cluster {} with UID {}",
+                                        configMapName, targetClusterId, createdConfigMap.getMetadata().getUid());
+                            } else {
+                                LOGGER.warnCr(reconciliation, "GC ConfigMap {} in cluster {} has no UID",
+                                        configMapName, targetClusterId);
+                            }
+                        } else {
+                            LOGGER.warnCr(reconciliation, "Could not retrieve GC ConfigMap {} from cluster {}",
+                                    configMapName, targetClusterId);
+                        }
+                        return Future.succeededFuture();
+                    }, error -> {
+                        LOGGER.errorCr(reconciliation, "Failed to create/fetch GC ConfigMap {} in cluster {}: {}",
+                                configMapName, targetClusterId, error.getMessage(), error);
+                        return Future.succeededFuture(); // Continue with other clusters even if one fails
+                    })
             );
         }
 
@@ -2689,5 +2688,46 @@ public class KafkaReconciler {
         // Return future
         return Future.join(statusUpdateFutures)
                 .mapEmpty();
+    }
+
+    /**
+     * Adds the garbage collector ConfigMap as an owner reference to a list of resources.
+     * This enables automatic cleanup when the Kafka CR is deleted from the central cluster.
+     *
+     * @param targetClusterId The target cluster ID
+     * @param resources List of resources to add owner reference to
+     * @param <T> Resource type (must extend HasMetadata)
+     * @return List of resources with GC ConfigMap as owner
+     */
+    private <T extends HasMetadata> List<T> addGarbageCollectorOwnerReference(String targetClusterId, List<T> resources) {
+        String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+        String gcUid = gcConfigMapUids.get(targetClusterId);
+        
+        if (gcUid == null) {
+            LOGGER.warnCr(reconciliation, "GC ConfigMap UID not found for cluster {}, cannot add owner reference", targetClusterId);
+            return resources; // Return unchanged if UID not available
+        }
+        
+        // Create owner reference for the GC ConfigMap with the actual UID
+        OwnerReference gcOwnerRef = new OwnerReferenceBuilder()
+                .withApiVersion("v1")
+                .withKind("ConfigMap")
+                .withName(gcConfigMapName)
+                .withUid(gcUid)
+                .withController(false)
+                .withBlockOwnerDeletion(false)
+                .build();
+
+        List<T> updatedResources = new ArrayList<>();
+        for (T resource : resources) {
+            // Add owner reference to the resource metadata
+            if (resource.getMetadata().getOwnerReferences() == null) {
+                resource.getMetadata().setOwnerReferences(new ArrayList<>());
+            }
+            resource.getMetadata().getOwnerReferences().add(gcOwnerRef);
+            updatedResources.add(resource);
+        }
+
+        return updatedResources;
     }
 }

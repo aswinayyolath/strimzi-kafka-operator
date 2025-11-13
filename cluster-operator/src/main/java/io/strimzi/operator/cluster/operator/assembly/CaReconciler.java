@@ -4,6 +4,7 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
@@ -30,6 +31,7 @@ import io.strimzi.operator.cluster.operator.resource.KafkaAgentClientProvider;
 import io.strimzi.operator.cluster.operator.resource.KafkaRoller;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.DeploymentOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
@@ -111,6 +113,8 @@ public class CaReconciler {
     SecretOperator remoteSecretOperator;
     StrimziPodSetOperator remotePodSetOperator;
     PodOperator remotePodOperator;
+    ConfigMapOperator remoteConfigMapOperator;
+    OwnerReference gcOwnerRef; // GC ConfigMap owner reference for remote cluster secrets only
 
     /**
      * Constructs the CA reconciler which reconciles the Cluster and Client CAs
@@ -170,26 +174,52 @@ public class CaReconciler {
      * Configures the CaReconciler for "stretch mode" reconciliation in a remote cluster.
      * When CA's are reconciled in the remote cluster, this function sets:
      * - isStretchMode to true
-     * - ownerRef to null
+     * - ownerRef to GC ConfigMap owner reference (if GC ConfigMap exists)
      * - remoteSecretOperator to the provided remote secret operator.
      *
-     * @param remoteSecretOperator  The SecretOperator instance for the remote cluster where CAs will be reconciled.
-     * @param remotePodSetOperator  The StrimziPodSetOperator instance for the remote cluster where CAs will be reconciled.
-     * @param remotePodOperator     The PodOperator instance for the remote cluster where CAs will be reconciled.
-     * @param clusterCa             The Cluster CA of the kafka cluster, created at the central cluster
-     * @param clientsCa             The Client CA of the kafka cluster, created at the central cluster
-     * @param targetClusterId       The target cluster Id where the certs are to be reconciled
+     * @param remoteSecretOperator      The SecretOperator instance for the remote cluster where CAs will be reconciled.
+     * @param remotePodSetOperator      The StrimziPodSetOperator instance for the remote cluster where CAs will be reconciled.
+     * @param remotePodOperator         The PodOperator instance for the remote cluster where CAs will be reconciled.
+     * @param remoteConfigMapOperator   The ConfigMapOperator instance for the remote cluster to fetch GC ConfigMap UID.
+     * @param clusterCa                 The Cluster CA of the kafka cluster, created at the central cluster
+     * @param clientsCa                 The Client CA of the kafka cluster, created at the central cluster
+     * @param targetClusterId           The target cluster Id where the certs are to be reconciled
      * @return The same CaReconciler object, updated with the stretch configuration.
      */
-    public CaReconciler withStretchConfig(SecretOperator remoteSecretOperator, StrimziPodSetOperator remotePodSetOperator, PodOperator remotePodOperator, ClusterCa clusterCa, ClientsCa clientsCa, String targetClusterId) {
+    public CaReconciler withStretchConfig(SecretOperator remoteSecretOperator, StrimziPodSetOperator remotePodSetOperator, PodOperator remotePodOperator, ConfigMapOperator remoteConfigMapOperator, ClusterCa clusterCa, ClientsCa clientsCa, String targetClusterId) {
         this.remoteSecretOperator = remoteSecretOperator;
         this.remotePodSetOperator = remotePodSetOperator;
         this.remotePodOperator = remotePodOperator;
+        this.remoteConfigMapOperator = remoteConfigMapOperator;
         this.isStretchMode = true;
-        this.ownerRef = null;
         this.clusterCa = clusterCa;
         this.clientsCa = clientsCa;
         this.targetClusterId = targetClusterId;
+        
+        // Try to fetch GC ConfigMap UID and set as owner reference for remote cluster secrets
+        String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
+        ConfigMap gcConfigMap = remoteConfigMapOperator.get(reconciliation.namespace(), gcConfigMapName);
+        
+        if (gcConfigMap != null && gcConfigMap.getMetadata().getUid() != null) {
+            this.gcOwnerRef = new OwnerReferenceBuilder()
+                    .withApiVersion("v1")
+                    .withKind("ConfigMap")
+                    .withName(gcConfigMapName)
+                    .withUid(gcConfigMap.getMetadata().getUid())
+                    .withController(false)
+                    .withBlockOwnerDeletion(false)  // Must be false for ConfigMap owners
+                    .build();
+            LOGGER.infoCr(reconciliation, "Set GC ConfigMap {} (UID: {}) as owner for CA secrets in remote cluster {}",
+                    gcConfigMapName, gcConfigMap.getMetadata().getUid(), targetClusterId);
+        } else {
+            this.gcOwnerRef = null;
+            LOGGER.warnCr(reconciliation, "GC ConfigMap {} not found in remote cluster {}, CA secrets will not have owner reference",
+                    gcConfigMapName, targetClusterId);
+        }
+        
+        // Keep ownerRef as null for remote clusters (no Kafka CR owner)
+        this.ownerRef = null;
+        
         return this;
     }
 
@@ -328,7 +358,8 @@ public class CaReconciler {
                                 isForceReplace(existingClusterCaKeySecret),
                                 isForceRenew(existingClusterCaCertSecret));
 
-                        OwnerReference ownerReference = clusterCaConfig != null && !clusterCaConfig.isGenerateSecretOwnerReference() ? null : ownerRef;
+                        // For stretch mode, use GC ConfigMap as owner; otherwise use Kafka CR
+                        OwnerReference ownerReference = clusterCaConfig != null && !clusterCaConfig.isGenerateSecretOwnerReference() ? null : (isStretchMode ? gcOwnerRef : ownerRef);
 
                         clusterCaCertSecret = createCaCertSecret(clusterCaCertName, clusterCaCertLabels, clusterCaCertAnnotations, ownerReference, clusterCa, existingClusterCaCertSecret);
                         secretReconciliations.add(getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clusterCaCertName, clusterCaCertSecret));
@@ -344,7 +375,8 @@ public class CaReconciler {
                                 isForceReplace(existingClientsCaKeySecret),
                                 isForceRenew(existingClientsCaCertSecret));
 
-                        OwnerReference ownerReference = clientsCaConfig != null && !clientsCaConfig.isGenerateSecretOwnerReference() ? null : ownerRef;
+                        // For stretch mode, use GC ConfigMap as owner; otherwise use Kafka CR
+                        OwnerReference ownerReference = clientsCaConfig != null && !clientsCaConfig.isGenerateSecretOwnerReference() ? null : (isStretchMode ? gcOwnerRef : ownerRef);
 
                         Secret clientsCaCertSecret = createCaCertSecret(clientsCaCertName, Map.of(), Map.of(), ownerReference, clientsCa, existingClientsCaCertSecret);
                         secretReconciliations.add(getSecretOperator().reconcile(reconciliation, reconciliation.namespace(), clientsCaCertName, clientsCaCertSecret));
