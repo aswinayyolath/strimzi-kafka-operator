@@ -9,14 +9,18 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Service;
+import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
+import io.fabric8.kubernetes.api.model.networking.v1.IngressBuilder;
 import io.fabric8.openshift.api.model.Route;
+import io.fabric8.openshift.api.model.RouteBuilder;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.kafka.KafkaResources;
 import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListener;
 import io.strimzi.api.kafka.model.kafka.listener.KafkaListenerType;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
 import io.strimzi.operator.cluster.model.KafkaCluster;
+import io.strimzi.operator.cluster.model.KafkaPool;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
@@ -281,7 +285,7 @@ public final class StretchKafkaListenersReconciler {
                 services = services.stream()
                     .map(svc -> {
                         // First remove existing owner references
-                        svc = new io.fabric8.kubernetes.api.model.ServiceBuilder(svc)
+                        svc = new ServiceBuilder(svc)
                             .editMetadata()
                                 .withOwnerReferences()  // Empty list
                             .endMetadata()
@@ -367,7 +371,7 @@ public final class StretchKafkaListenersReconciler {
                 routes = routes.stream()
                     .map(route -> {
                         // First remove existing owner references
-                        route = new io.fabric8.openshift.api.model.RouteBuilder(route)
+                        route = new RouteBuilder(route)
                             .editMetadata()
                                 .withOwnerReferences()
                             .endMetadata()
@@ -448,7 +452,7 @@ public final class StretchKafkaListenersReconciler {
                 ingresses = ingresses.stream()
                     .map(ingress -> {
                         // First remove existing owner references
-                        ingress = new io.fabric8.kubernetes.api.model.networking.v1.IngressBuilder(ingress)
+                        ingress = new IngressBuilder(ingress)
                             .editMetadata()
                                 .withOwnerReferences()
                             .endMetadata()
@@ -1132,7 +1136,7 @@ public final class StretchKafkaListenersReconciler {
                     .get("strimzi.io/stretch-cluster-alias");
 
             if (clusterId.equals(poolClusterId)) {
-                return io.strimzi.operator.cluster.model.KafkaPool.componentName(kafka, pool);
+                return KafkaPool.componentName(kafka, pool);
             }
         }
 

@@ -33,6 +33,7 @@ import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
 import io.strimzi.operator.cluster.operator.VertxUtil;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.CrdOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
@@ -1035,8 +1036,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
 
         for (String clusterId : remoteClusterIds) {
             // Get the ConfigMapOperator for this cluster
-            io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator configMapOp = 
-                    getConfigMapOperatorForCluster(clusterId);
+            ConfigMapOperator configMapOp = getConfigMapOperatorForCluster(clusterId);
             
             if (configMapOp != null) {
                 LOGGER.infoCr(reconciliation, "Deleting garbage collector ConfigMap {} from cluster {}", 
@@ -1062,7 +1062,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      * @param clusterId The cluster ID
      * @return ConfigMapOperator for the cluster, or null if not found
      */
-    private io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator getConfigMapOperatorForCluster(String clusterId) {
+    private ConfigMapOperator getConfigMapOperatorForCluster(String clusterId) {
         if (remoteResourceOperatorSupplier == null) {
             LOGGER.warnOp("Remote resource operator supplier not available, cannot access cluster {}", clusterId);
             return null;
