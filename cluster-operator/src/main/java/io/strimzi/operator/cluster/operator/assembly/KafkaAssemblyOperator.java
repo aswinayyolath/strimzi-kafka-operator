@@ -4,6 +4,8 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
+import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -62,6 +64,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -587,12 +590,12 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
             List<Future<Void>> futures = new ArrayList<>();
             
             for (String targetClusterId : remoteClusterIds) {
-                io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator configMapOp = 
+                ConfigMapOperator configMapOp = 
                     remoteResourceOperatorSupplier.get(targetClusterId).configMapOperations;
                 String gcConfigMapName = KafkaResources.kafkaComponentName(name) + "-gc";
 
                 // Build the ConfigMap with metadata about managed resources
-                io.fabric8.kubernetes.api.model.ConfigMap gcConfigMap = new io.fabric8.kubernetes.api.model.ConfigMapBuilder()
+                ConfigMap gcConfigMap = new ConfigMapBuilder()
                         .withNewMetadata()
                             .withName(gcConfigMapName)
                             .withNamespace(namespace)
@@ -601,9 +604,9 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                             .addToLabels("strimzi.io/cluster", name)
                             .addToLabels("strimzi.io/component-type", "garbage-collector")
                             .addToLabels("strimzi.io/remote-cluster", targetClusterId)
-                            .withOwnerReferences(java.util.Collections.emptyList()) // No owner references
+                            .withOwnerReferences(Collections.emptyList()) // No owner references
                         .endMetadata()
-                        .withData(java.util.Map.of(
+                        .withData(Map.of(
                             "cluster-id", targetClusterId,
                             "kafka-cluster", name,
                             "namespace", namespace,
@@ -684,7 +687,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     remoteResourceOperatorSupplier.get(targetClusterId).strimziPodSetOperator;
                 PodOperator remotePodOp = 
                     remoteResourceOperatorSupplier.get(targetClusterId).podOperations;
-                io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator remoteConfigMapOp = 
+                ConfigMapOperator remoteConfigMapOp = 
                     remoteResourceOperatorSupplier.get(targetClusterId).configMapOperations;
                 CaReconciler remoteCaReconciler = new CaReconciler(
                     reconciliation,

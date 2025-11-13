@@ -539,7 +539,7 @@ public class KafkaReconciler {
                                     
                                     return new io.fabric8.kubernetes.api.model.SecretBuilder(secret)
                                         .editMetadata()
-                                            .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                                            .withOwnerReferences((List<OwnerReference>) null)
                                             .addNewOwnerReference()
                                                 .withApiVersion("v1")
                                                 .withKind("ConfigMap")
@@ -1484,7 +1484,7 @@ public class KafkaReconciler {
                 
                 sa = new io.fabric8.kubernetes.api.model.ServiceAccountBuilder(serviceAccount)
                     .editMetadata()
-                        .withOwnerReferences((List<io.fabric8.kubernetes.api.model.OwnerReference>) null)
+                        .withOwnerReferences((List<OwnerReference>) null)
                         .addNewOwnerReference()
                             .withApiVersion("v1")
                             .withKind("ConfigMap")
