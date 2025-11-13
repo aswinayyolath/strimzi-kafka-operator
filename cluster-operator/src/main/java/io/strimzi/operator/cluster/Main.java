@@ -196,7 +196,7 @@ public class Main {
             kafkaClusterOperations = new KafkaAssemblyOperator(vertx, pfa, certManager, passwordGenerator, resourceOperatorSupplier, config);
             // Add stretch capabilities if configured
             if (remoteResourceOperatorSupplier != null) {
-                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remoteResourceOperatorSupplier);
+                kafkaClusterOperations = kafkaClusterOperations.withStretchCapabilities(remoteResourceOperatorSupplier, remotePfas);
             }
             kafkaConnectClusterOperations = new KafkaConnectAssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
             kafkaMirrorMaker2AssemblyOperator = new KafkaMirrorMaker2AssemblyOperator(vertx, pfa, resourceOperatorSupplier, config);
