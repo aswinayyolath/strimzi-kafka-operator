@@ -603,6 +603,10 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
         }
 
         Future<ReconciliationState> reconcileRemoteCas(Clock clock) {
+            if (!(isStretchClusterWithPluggableProvider(kafkaAssembly) &&
+                KafkaAssemblyOperator.this.remoteResourceOperatorSupplier != null)) {
+                return Future.succeededFuture(this);
+            }
             List<Future<Void>> futures = new ArrayList<>();
             Set<String> remoteClusterIds = config.getRemoteClusters().keySet();
             for (String targetClusterId : remoteClusterIds) {
