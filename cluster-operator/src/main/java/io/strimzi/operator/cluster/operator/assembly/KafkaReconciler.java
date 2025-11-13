@@ -578,6 +578,10 @@ public class KafkaReconciler {
     /**
      * Reconciles networking resources for stretch clusters using the networking provider.
      * This creates ServiceExports and other networking resources needed for cross-cluster communication.
+     * 
+     * <p>The networking provider is called once per broker node per cluster. The provider is responsible
+     * for creating the necessary resources (e.g., ServiceExports for MCS) and managing their ownership
+     * to ensure proper garbage collection when the Kafka cluster is deleted.</p>
      *
      * @return Future which completes when networking resources are reconciled
      */
@@ -589,23 +593,15 @@ public class KafkaReconciler {
         List<Future<Void>> futures = new ArrayList<>();
         String namespace = reconciliation.namespace();
 
+        // Build port map once - it's the same for all nodes
+        Map<String, Integer> ports = buildNetworkingPorts();
+
         // Create networking resources for each broker in each cluster
+        // Note: The plugin may deduplicate internally (e.g., MCS creates one ServiceExport per cluster)
         for (String clusterId : clusterIds) {
             for (NodeRef node : kafka.nodes()) {
                 if (!node.broker()) {
                     continue; // Skip controller-only nodes
-                }
-
-                // Extract ports from the broker configuration
-                Map<String, Integer> ports = new HashMap<>();
-
-                // Add standard Kafka ports
-                ports.put("tcp-replication", 9091);
-                ports.put("tcp-ctrlplane", 9090);
-
-                // Add listener ports if configured
-                for (GenericKafkaListener listener : kafka.getListeners()) {
-                    ports.put("tcp-" + listener.getName(), listener.getPort());
                 }
 
                 futures.add(
@@ -615,12 +611,35 @@ public class KafkaReconciler {
                         node.podName(),
                         clusterId,
                         ports
-                    ).mapEmpty() // Convert to Future<Void>
+                    ).mapEmpty()
                 );
             }
         }
 
         return Future.join(futures).mapEmpty();
+    }
+
+    /**
+     * Builds the port map for networking resources based on the Kafka cluster configuration.
+     * This includes standard Kafka ports (replication, control plane) and user-configured listeners.
+     *
+     * @return Map of port names to port numbers
+     */
+    private Map<String, Integer> buildNetworkingPorts() {
+        Map<String, Integer> ports = new HashMap<>();
+
+        // Add standard Kafka ports (replication and control plane)
+        // Port names must match those defined in KafkaCluster
+        ports.put("tcp-replication", KafkaCluster.REPLICATION_PORT);
+        ports.put("tcp-ctrlplane", 9090); // CONTROLPLANE_PORT is protected in KafkaCluster
+
+        // Add user-configured listener ports
+        for (GenericKafkaListener listener : kafka.getListeners()) {
+            String portName = "tcp-" + listener.getName();
+            ports.put(portName, listener.getPort());
+        }
+
+        return ports;
     }
 
     /**
