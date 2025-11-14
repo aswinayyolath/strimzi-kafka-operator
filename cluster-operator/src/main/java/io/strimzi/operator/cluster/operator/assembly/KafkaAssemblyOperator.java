@@ -121,6 +121,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
     protected Clock clock;
     private StretchNetworkingProvider stretchNetworkingProvider;
     private io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier;
+    private Map<String, PlatformFeaturesAvailability> remotePfas;
 
     /**
      * @param vertx The Vertx instance
@@ -151,10 +152,12 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
      * This method should be called after construction if stretch cluster mode is enabled.
      *
      * @param remoteResourceOperatorSupplier Supplies the operators for remote clusters
+     * @param remotePfas Remote platform features availabilities
      * @return This operator instance for method chaining
      */
     public KafkaAssemblyOperator withStretchCapabilities(
-            io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier) {
+            io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteResourceOperatorSupplier,
+            Map<String, PlatformFeaturesAvailability> remotePfas) {
 
         if (config.isStretchClusterConfigured()) {
             INIT_LOGGER.info("Stretch cluster configuration detected (central: {}, provider: {})",
@@ -179,6 +182,7 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                 // Store the provider and remote supplier for use in reconciliation
                 this.stretchNetworkingProvider = networkingProvider;
                 this.remoteResourceOperatorSupplier = remoteResourceOperatorSupplier;
+                this.remotePfas = remotePfas;
 
                 INIT_LOGGER.info("Stretch cluster support initialized with provider: {}",
                            networkingProvider != null ? networkingProvider.getProviderName() : "none");
@@ -780,7 +784,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     KafkaAssemblyOperator.this.remoteResourceOperatorSupplier,
                     KafkaAssemblyOperator.this.stretchNetworkingProvider,
                     KafkaAssemblyOperator.this.config.getCentralClusterId(),
-                    KafkaAssemblyOperator.this.supplier
+                    KafkaAssemblyOperator.this.supplier,
+                    KafkaAssemblyOperator.this.remotePfas
                 );
             }
 
