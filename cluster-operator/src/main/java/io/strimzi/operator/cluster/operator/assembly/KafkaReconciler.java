@@ -171,6 +171,8 @@ public class KafkaReconciler {
     /* test */ Map<String, StorageClassOperator> stretchStorageClassOperators;
     /* test */ Map<String, ClusterRoleBindingOperator> stretchClusterRoleBindingOperators;
     /* test */ Map<String, ServiceOperator> stretchServiceOperators;
+    /* test */ Map<String, RouteOperator> stretchRouteOperators;
+    /* test */ Map<String, IngressOperator> stretchIngressOperators;
     /* test */ io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider networkingProvider;
     /* test */ io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier centralSupplier;
     /* test */ io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier remoteSupplier;
@@ -315,6 +317,8 @@ public class KafkaReconciler {
         this.stretchStorageClassOperators = new HashMap<>();
         this.stretchClusterRoleBindingOperators = new HashMap<>();
         this.stretchServiceOperators = new HashMap<>();
+        this.stretchRouteOperators = new HashMap<>();
+        this.stretchIngressOperators = new HashMap<>();
 
         // Populate maps from remote supplier
         for (String clusterId : remoteResourceOperatorSupplier.remoteResourceOperators.keySet()) {
@@ -330,6 +334,8 @@ public class KafkaReconciler {
             stretchStorageClassOperators.put(clusterId, supplier.storageClassOperations);
             stretchClusterRoleBindingOperators.put(clusterId, supplier.clusterRoleBindingOperator);
             stretchServiceOperators.put(clusterId, supplier.serviceOperations);
+            stretchRouteOperators.put(clusterId, supplier.routeOperations);
+            stretchIngressOperators.put(clusterId, supplier.ingressOperations);
         }
 
         this.networkingProvider = networkingProvider;
@@ -1021,115 +1027,200 @@ public class KafkaReconciler {
 
     /**
      * Gets the Route address for a route-type listener.
+     * For stretch clusters, this queries routes from all clusters and returns all addresses.
      */
     private Future<ListenerStatus> getRouteAddress(GenericKafkaListener listener) {
         String bootstrapRouteName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(
                 reconciliation.name(), listener);
+        int port = 443; // Routes use HTTPS port
 
-        // Query the Route from the central cluster
-        return routeOperator.getAsync(reconciliation.namespace(), bootstrapRouteName)
-                .compose(route -> {
-                    if (route == null || route.getStatus() == null 
-                            || route.getStatus().getIngress() == null 
-                            || route.getStatus().getIngress().isEmpty()) {
-                        LOGGER.warnCr(reconciliation, "Route {} not ready yet, using fallback", bootstrapRouteName);
+        List<Future<ListenerAddress>> addressFutures = new ArrayList<>();
+
+        // Query routes from all clusters
+        for (String clusterId : clusterIds) {
+            RouteOperator routeOp = selectRouteOperator(clusterId);
+            addressFutures.add(
+                routeOp.getAsync(reconciliation.namespace(), bootstrapRouteName)
+                    .compose(route -> {
+                        if (route == null || route.getStatus() == null 
+                                || route.getStatus().getIngress() == null 
+                                || route.getStatus().getIngress().isEmpty()) {
+                            LOGGER.warnCr(reconciliation, "Route {} not ready in cluster {}", 
+                                    bootstrapRouteName, clusterId);
+                            return Future.succeededFuture((ListenerAddress) null);
+                        }
+
+                        String externalHost = route.getStatus().getIngress().get(0).getHost();
+                        return Future.succeededFuture(new ListenerAddressBuilder()
+                                .withHost(externalHost)
+                                .withPort(port)
+                                .build());
+                    })
+                    .recover(error -> {
+                        LOGGER.warnCr(reconciliation, "Failed to get Route in cluster {}: {}", 
+                                clusterId, error.getMessage());
+                        return Future.succeededFuture((ListenerAddress) null);
+                    })
+            );
+        }
+
+        return Future.join(addressFutures)
+                .compose(result -> {
+                    List<ListenerAddress> addresses = new ArrayList<>();
+
+                    for (int i = 0; i < result.size(); i++) {
+                        ListenerAddress address = result.resultAt(i);
+                        if (address != null) {
+                            addresses.add(address);
+                        }
+                    }
+
+                    if (addresses.isEmpty()) {
+                        LOGGER.warnCr(reconciliation, "No Route addresses found, using fallback");
                         return getInternalAddress(listener);
                     }
 
-                    String externalHost = route.getStatus().getIngress().get(0).getHost();
-                    int port = 443; // Routes use HTTPS port
-
                     ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
                             .withName(listener.getName())
-                            .withAddresses(new ListenerAddressBuilder()
-                                    .withHost(externalHost)
-                                    .withPort(port)
-                                    .build());
+                            .withAddresses(addresses); // bootstrapServers is auto-generated from addresses
 
                     if (listener.isTls() && clusterCa != null) {
                         statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
                     }
 
                     return Future.succeededFuture(statusBuilder.build());
-                })
-                .recover(error -> {
-                    LOGGER.warnCr(reconciliation, "Failed to get Route address for listener {}: {}", 
-                            listener.getName(), error.getMessage());
-                    return getInternalAddress(listener);
                 });
     }
 
     /**
      * Gets the Ingress address for an ingress-type listener.
+     * For stretch clusters, this queries ingresses from all clusters and returns all addresses.
      */
     private Future<ListenerStatus> getIngressAddress(GenericKafkaListener listener) {
         String bootstrapIngressName = ListenersUtils.backwardsCompatibleBootstrapRouteOrIngressName(
                 reconciliation.name(), listener);
+        int port = listener.isTls() ? 443 : 80;
 
-        return ingressOperator.getAsync(reconciliation.namespace(), bootstrapIngressName)
-                .compose(ingress -> {
-                    if (ingress == null || ingress.getStatus() == null 
-                            || ingress.getStatus().getLoadBalancer() == null 
-                            || ingress.getStatus().getLoadBalancer().getIngress() == null
-                            || ingress.getStatus().getLoadBalancer().getIngress().isEmpty()) {
-                        LOGGER.warnCr(reconciliation, "Ingress {} not ready yet, using fallback", bootstrapIngressName);
+        List<Future<ListenerAddress>> addressFutures = new ArrayList<>();
+
+        // Query ingresses from all clusters
+        for (String clusterId : clusterIds) {
+            IngressOperator ingressOp = selectIngressOperator(clusterId);
+            addressFutures.add(
+                ingressOp.getAsync(reconciliation.namespace(), bootstrapIngressName)
+                    .compose(ingress -> {
+                        if (ingress == null || ingress.getStatus() == null 
+                                || ingress.getStatus().getLoadBalancer() == null 
+                                || ingress.getStatus().getLoadBalancer().getIngress() == null
+                                || ingress.getStatus().getLoadBalancer().getIngress().isEmpty()) {
+                            LOGGER.warnCr(reconciliation, "Ingress {} not ready in cluster {}", 
+                                    bootstrapIngressName, clusterId);
+                            return Future.succeededFuture((ListenerAddress) null);
+                        }
+
+                        var ingressStatus = ingress.getStatus().getLoadBalancer().getIngress().get(0);
+                        String externalHost = ingressStatus.getHostname() != null 
+                                ? ingressStatus.getHostname() 
+                                : ingressStatus.getIp();
+
+                        return Future.succeededFuture(new ListenerAddressBuilder()
+                                .withHost(externalHost)
+                                .withPort(port)
+                                .build());
+                    })
+                    .recover(error -> {
+                        LOGGER.warnCr(reconciliation, "Failed to get Ingress in cluster {}: {}", 
+                                clusterId, error.getMessage());
+                        return Future.succeededFuture((ListenerAddress) null);
+                    })
+            );
+        }
+
+        return Future.join(addressFutures)
+                .compose(result -> {
+                    List<ListenerAddress> addresses = new ArrayList<>();
+
+                    for (int i = 0; i < result.size(); i++) {
+                        ListenerAddress address = result.resultAt(i);
+                        if (address != null) {
+                            addresses.add(address);
+                        }
+                    }
+
+                    if (addresses.isEmpty()) {
+                        LOGGER.warnCr(reconciliation, "No Ingress addresses found, using fallback");
                         return getInternalAddress(listener);
                     }
 
-                    var ingressStatus = ingress.getStatus().getLoadBalancer().getIngress().get(0);
-                    String externalHost = ingressStatus.getHostname() != null 
-                            ? ingressStatus.getHostname() 
-                            : ingressStatus.getIp();
-
-                    int port = listener.isTls() ? 443 : 80;
-
                     ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
                             .withName(listener.getName())
-                            .withAddresses(new ListenerAddressBuilder()
-                                    .withHost(externalHost)
-                                    .withPort(port)
-                                    .build());
+                            .withAddresses(addresses); // bootstrapServers is auto-generated from addresses
 
                     if (listener.isTls() && clusterCa != null) {
                         statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
                     }
 
                     return Future.succeededFuture(statusBuilder.build());
-                })
-                .recover(error -> {
-                    LOGGER.warnCr(reconciliation, "Failed to get Ingress address for listener {}: {}", 
-                            listener.getName(), error.getMessage());
-                    return getInternalAddress(listener);
                 });
     }
 
     /**
      * Gets the internal MCS address for internal/cluster-ip listeners.
+     * For stretch clusters, this returns addresses from all clusters.
      */
     private Future<ListenerStatus> getInternalAddress(GenericKafkaListener listener) {
         String bootstrapServiceName = KafkaResources.bootstrapServiceName(kafkaCr.getMetadata().getName()) 
                 + "-" + listener.getName();
-        String bootstrapHost = networkingProvider != null 
-                ? networkingProvider.generateServiceDnsName(
-                        reconciliation.namespace(), 
-                        bootstrapServiceName, 
-                        stretchCentralClusterId)
-                : bootstrapServiceName + "." + reconciliation.namespace() + ".svc";
-
         int port = listener.getPort();
+
+        List<ListenerAddress> addresses = new ArrayList<>();
+
+        // Add address for each cluster in the stretch setup
+        for (String clusterId : clusterIds) {
+            String bootstrapHost = networkingProvider != null 
+                    ? networkingProvider.generateServiceDnsName(
+                            reconciliation.namespace(), 
+                            bootstrapServiceName, 
+                            clusterId)
+                    : bootstrapServiceName + "." + reconciliation.namespace() + ".svc";
+
+            addresses.add(new ListenerAddressBuilder()
+                    .withHost(bootstrapHost)
+                    .withPort(port)
+                    .build());
+        }
 
         ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
                 .withName(listener.getName())
-                .withAddresses(new ListenerAddressBuilder()
-                        .withHost(bootstrapHost)
-                        .withPort(port)
-                        .build());
+                .withAddresses(addresses); // bootstrapServers is auto-generated from addresses
 
         if (listener.isTls() && clusterCa != null) {
             statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
         }
 
         return Future.succeededFuture(statusBuilder.build());
+    }
+
+    /**
+     * Selects the appropriate RouteOperator for the given cluster ID.
+     * Returns the central operator for the central cluster, or gets the operator from stretch operators map.
+     */
+    private RouteOperator selectRouteOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return routeOperator;
+        }
+        return stretchRouteOperators.get(clusterId);
+    }
+
+    /**
+     * Selects the appropriate IngressOperator for the given cluster ID.
+     * Returns the central operator for the central cluster, or gets the operator from stretch operators map.
+     */
+    private IngressOperator selectIngressOperator(String clusterId) {
+        if (clusterId.equals(stretchCentralClusterId)) {
+            return ingressOperator;
+        }
+        return stretchIngressOperators.get(clusterId);
     }
 
     private Future<Void> updateKafkaAutoRebalanceStatus(KafkaStatus kafkaStatus) {
