@@ -115,14 +115,58 @@ public class Main {
                 })
                 .onComplete(res -> {
                     if (res.failed())   {
-                        LOGGER.error("Unable to start operator for 1 or more namespace", res.cause());
-                        vertx.executeBlocking(() -> {
-                            System.exit(1);
-                            return true;
-                        });
-
+                        handleStartupFailure(res.cause(), vertx);
                     }
                 });
+    }
+
+    /**
+     * Handles startup failures with appropriate error messages and exits the operator.
+     * Provides specific guidance for authentication failures in stretch cluster configurations.
+     *
+     * @param cause The exception that caused the startup failure
+     * @param vertx Vertx instance for executing the shutdown
+     */
+    private static void handleStartupFailure(Throwable cause, Vertx vertx) {
+        if (isAuthenticationFailure(cause)) {
+            logStretchClusterAuthenticationError(cause);
+        } else {
+            LOGGER.error("Unable to start operator for 1 or more namespace", cause);
+        }
+
+        vertx.executeBlocking(() -> {
+            System.exit(1);
+            return true;
+        });
+    }
+
+    /**
+     * Checks if the failure is due to authentication issues with remote clusters.
+     *
+     * @param cause The exception to check
+     * @return true if this is an authentication failure, false otherwise
+     */
+    private static boolean isAuthenticationFailure(Throwable cause) {
+        return cause instanceof IllegalStateException &&
+               cause.getMessage() != null &&
+               cause.getMessage().contains("Authentication failed for remote cluster");
+    }
+
+    /**
+     * Logs a detailed error message for stretch cluster authentication failures.
+     * Provides actionable guidance for resolving expired or invalid kubeconfig secrets.
+     *
+     * @param cause The authentication failure exception
+     */
+    private static void logStretchClusterAuthenticationError(Throwable cause) {
+        LOGGER.error("Failed to start Cluster Operator due to invalid remote cluster credentials: {}\n" +
+                     "The kubeconfig secret referenced in STRIMZI_REMOTE_KUBE_CONFIG appears to be invalid or expired.\n" +
+                     "To resolve this issue:\n" +
+                     "  1. Verify the secret contains valid, non-expired credentials\n" +
+                     "  2. Update the secret with fresh credentials if necessary\n" +
+                     "Note: Short-lived tokens (e.g., 24-hour tokens) require periodic renewal. " +
+                     "Consider using long-lived service account tokens or certificate-based authentication for production environments.",
+                     cause.getMessage());
     }
 
     /**
