@@ -132,10 +132,11 @@ public class StretchInitializer {
 
             pfaFutures.add(PlatformFeaturesAvailability
                 .create(vertx, clusterClient, true)
+                .recover(error -> handleRemoteClusterConnectionError(clusterId, error))
                 .compose(pfaResult -> {
                     remotePfas.put(clusterId, pfaResult);
                     LOGGER.info("PlatformFeaturesAvailability created for remote cluster '{}'", clusterId);
-                    return Future.succeededFuture();
+                    return Future.succeededFuture(pfaResult);
                 }));
         }
 
@@ -209,5 +210,51 @@ public class StretchInitializer {
             // Don't fail startup - allow operator to start but stretch clusters won't work
             return null;
         }
+    }
+
+    /**
+     * Handles connection errors when attempting to connect to remote clusters.
+     * Provides specific error messages for authentication failures (expired tokens).
+     *
+     * @param clusterId The ID of the remote cluster that failed to connect
+     * @param error The error that occurred during connection
+     * @return A failed Future with an appropriate exception
+     */
+    private static Future<PlatformFeaturesAvailability> handleRemoteClusterConnectionError(String clusterId, Throwable error) {
+        if (isAuthenticationError(error)) {
+            LOGGER.error("Failed to connect to remote cluster '{}'. " +
+                "The kubeconfig secret appears to be invalid or expired. " +
+                "Please update the secret referenced in STRIMZI_REMOTE_KUBE_CONFIG with valid credentials. " +
+                "Error: {}", clusterId, error.getMessage());
+
+            return Future.failedFuture(new IllegalStateException(
+                String.format("Authentication failed for remote cluster '%s'. " +
+                    "The kubeconfig secret may have expired. " +
+                    "Please update the secret with valid credentials.", clusterId),
+                error));
+        }
+
+        LOGGER.error("Failed to create PlatformFeaturesAvailability for remote cluster '{}': {}",
+            clusterId, error.getMessage());
+        return Future.failedFuture(error);
+    }
+
+    /**
+     * Checks if an error is related to authentication or authorization failures.
+     * This typically indicates expired or invalid credentials.
+     *
+     * @param error The error to check
+     * @return true if this is an authentication/authorization error, false otherwise
+     */
+    private static boolean isAuthenticationError(Throwable error) {
+        if (error == null || error.getMessage() == null) {
+            return false;
+        }
+
+        String message = error.getMessage();
+        return message.contains("Unauthorized") ||
+               message.contains("401") ||
+               message.contains("Forbidden") ||
+               message.contains("403");
     }
 }
