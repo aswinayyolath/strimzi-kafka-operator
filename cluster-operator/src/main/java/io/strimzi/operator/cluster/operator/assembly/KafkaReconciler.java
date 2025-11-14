@@ -1809,6 +1809,7 @@ public class KafkaReconciler {
             clusterIds,
             stretchCentralClusterId,
             remotePfas,
+            configMapOperator,
             remoteSupplier,
             networkingProvider
         );

@@ -4,7 +4,11 @@
  */
 package io.strimzi.operator.cluster.operator.assembly;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.LoadBalancerStatus;
+import io.fabric8.kubernetes.api.model.OwnerReference;
+import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceSpec;
@@ -27,6 +31,7 @@ import io.strimzi.operator.cluster.model.KafkaCluster;
 import io.strimzi.operator.cluster.model.ListenersUtils;
 import io.strimzi.operator.cluster.model.ModelUtils;
 import io.strimzi.operator.cluster.model.NodeRef;
+import io.strimzi.operator.cluster.operator.resource.kubernetes.ConfigMapOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.IngressOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.RouteOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
@@ -74,10 +79,12 @@ public class KafkaListenersReconciler {
     private final ServiceOperator serviceOperator;
     private final RouteOperator routeOperator;
     private final IngressOperator ingressOperator;
+    private ConfigMapOperator configMapOperator;
 
     private Map<String, ServiceOperator> stretchServiceOperators;
     private Map<String, RouteOperator> stretchRouteOperators;
     private Map<String, IngressOperator> stretchIngressOperators;
+    private Map<String, ConfigMapOperator> stretchConfigMapOperators;
 
     private boolean isStretchMode = false;
     private List<String> targetClusterIds;
@@ -138,28 +145,33 @@ public class KafkaListenersReconciler {
      * @param targetClusterIds          The Target cluster ID fot a stretched kafka clusters
      * @param centralClusterId          The central cluter ID for a stretched kafka clusters
      * @param remotePfas                Object that describes the environment remote clusters run in
+     * @param configMapOperator         ConfigMap Operator for the central cluster
      * @param remoteSupplier            Remote Supplier object
      * @param networkingProvider        Networking Provider for stretch clusters
      * 
-     * @return  Returns a KafkaListenersReconciler instance with stretch cluster setup.
+     * @return  Returns a Ka,fkaListenersReconciler instance with stretch cluster setup.
      */
     public KafkaListenersReconciler withStretchConfig(
         List<String> targetClusterIds,
         String centralClusterId,
         Map<String, PlatformFeaturesAvailability> remotePfas,
+        ConfigMapOperator configMapOperator,
         RemoteResourceOperatorSupplier remoteSupplier,
         StretchNetworkingProvider networkingProvider
     ) {
+        this.configMapOperator = configMapOperator;
 
         this.stretchServiceOperators = new HashMap<>();
         this.stretchRouteOperators = new HashMap<>();
         this.stretchIngressOperators = new HashMap<>();
+        this.stretchConfigMapOperators = new HashMap<>();
 
 
         for (String clusterId : remoteSupplier.remoteResourceOperators.keySet()) {
             io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier supplier =
                 remoteSupplier.get(clusterId);
 
+            stretchConfigMapOperators.put(clusterId, supplier.configMapOperations);
             stretchServiceOperators.put(clusterId, supplier.serviceOperations);
             stretchIngressOperators.put(clusterId, supplier.ingressOperations);
             stretchRouteOperators.put(clusterId, supplier.routeOperations);
@@ -284,9 +296,10 @@ public class KafkaListenersReconciler {
             List<Service> services = Stream.concat(commonServices.stream(), perBrokerServices.stream())
                                         .collect(Collectors.toList());
 
-            if(!isCentral) {
+            if (!isCentralCluster) {
                 services = services.stream()
-                                    .map(svc -> addGCConfigMapOwner(svc, targetClusterId));
+                                    .map(svc -> addGCConfigMapOwner(svc, targetClusterId))
+                                    .collect(Collectors.toList());
             }
 
             futures.add(selectServiceOperator(targetClusterId)
@@ -299,7 +312,7 @@ public class KafkaListenersReconciler {
                     .mapEmpty()
             );
 
-            LOGGER.infoCr(reconciliation, "Set GC ConfigMap as owner for {} services in remote cluster {}", services.size(), clusterId);
+            LOGGER.infoCr(reconciliation, "Set GC ConfigMap as owner for {} services in remote cluster {}", services.size(), targetClusterId);
         }
 
         return Future.join(futures).mapEmpty();
@@ -395,7 +408,8 @@ public class KafkaListenersReconciler {
 
             if (!isCentralCluster) {
                 routes = routes.stream()
-                                .map(route -> addGCConfigMapOwner(route, targetClusterId));
+                                .map(route -> addGCConfigMapOwner(route, targetClusterId))
+                                .collect(Collectors.toList());
             }
             futures.add(
                 (isCentralCluster ? routeOperator : stretchRouteOperators.get(targetClusterId))
@@ -405,11 +419,11 @@ public class KafkaListenersReconciler {
                     routes, 
                     kafka.getSelectorLabels()
                 ).mapEmpty());
-        }
 
-        LOGGER.infoCr(reconciliation,
-            "Set GC ConfigMap as owner for {} routes in remote cluster {}",
-            routes.size(), clusterId);
+            LOGGER.infoCr(reconciliation,
+                "Set GC ConfigMap as owner for {} routes in remote cluster {}",
+                routes.size(), targetClusterId);
+        }
 
         return Future.join(futures).mapEmpty();
     }
@@ -459,7 +473,8 @@ public class KafkaListenersReconciler {
 
             if (!isCentralCluster) {
                 ingresses = ingresses.stream()
-                                    .map(ingress -> addGCConfigMapOwner(ingress, clusterId));
+                                    .map(ingress -> addGCConfigMapOwner(ingress, targetClusterId))
+                                    .collect(Collectors.toList());
             }
 
             futures.add(
@@ -473,7 +488,7 @@ public class KafkaListenersReconciler {
 
             LOGGER.infoCr(reconciliation,
                     "Set GC ConfigMap as owner for {} ingresses in remote cluster {}",
-                    ingresses.size(), clusterId);
+                    ingresses.size(), targetClusterId);
         }
 
         return Future.join(futures).mapEmpty();
@@ -1588,7 +1603,7 @@ public class KafkaListenersReconciler {
         }
 
         // Get GC ConfigMap name
-        String gcConfigMapName = kafka.getMetadata().getName() + "-kafka-gc";
+        String gcConfigMapName = reconciliation.name() + "-kafka-gc";
 
         // Get ConfigMapOperator for the cluster
         ConfigMapOperator configMapOp = getConfigMapOperatorForCluster(clusterId);
@@ -1600,7 +1615,7 @@ public class KafkaListenersReconciler {
         }
 
         // Fetch GC ConfigMap to get its UID
-        ConfigMap gcConfigMap = configMapOp.get(namespace, gcConfigMapName);
+        ConfigMap gcConfigMap = configMapOp.get(reconciliation.namespace(), gcConfigMapName);
         if (gcConfigMap == null || gcConfigMap.getMetadata().getUid() == null) {
             LOGGER.warnCr(reconciliation,
                     "GC ConfigMap {} not found or has no UID in cluster {}, cannot set owner",
@@ -1633,6 +1648,22 @@ public class KafkaListenersReconciler {
                 gcConfigMapName, gcUid, resource.getKind(), resource.getMetadata().getName(), clusterId);
         
         return resource;
+    }
+
+    /**
+     * Get ConfigMap operator for a specific cluster.
+     *
+     * @param clusterId Cluster ID
+     * @return ConfigMapOperator or null if not found
+     */
+    private ConfigMapOperator getConfigMapOperatorForCluster(
+            final String clusterId) {
+        if (clusterId.equals(centralClusterId)) {
+            return configMapOperator;
+        } else {
+            ConfigMapOperator cmOp = stretchConfigMapOperators.get(clusterId);
+            return cmOp != null ? cmOp : null;
+        }
     }
 
     /**
