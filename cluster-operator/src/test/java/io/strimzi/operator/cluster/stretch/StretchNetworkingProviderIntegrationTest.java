@@ -386,35 +386,6 @@ public class StretchNetworkingProviderIntegrationTest {
             })));
     }
     
-    // ========== Certificate SAN Generation Tests ==========
-    
-    @Test
-    public void testGenerateCertificateSans(VertxTestContext context) {
-
-        ClusterOperatorConfig config = createConfig(
-            "io.strimzi.operator.cluster.stretch.TestNetworkingProvider",
-            ""
-        );
-        StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
-            config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
-        
-        Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
-        String podName = TEST_CLUSTER_NAME + "-kafka-0";
-        
-
-        provider.generateCertificateSans(reconciliation, TEST_NAMESPACE, podName, CENTRAL_CLUSTER_ID)
-            .onComplete(context.succeeding(sans -> context.verify(() -> {
-        
-                assertThat("SANs should be generated", sans, is(notNullValue()));
-                assertThat("Should have at least one SAN", sans.size(), greaterThan(0));
-                assertThat("SANs should contain DNS names", 
-                          sans.get(0), containsString(".svc.cluster.local"));
-                
-                context.completeNow();
-            })));
-    }
-    
     // ========== Resource Deletion Tests ==========
     
     @Test

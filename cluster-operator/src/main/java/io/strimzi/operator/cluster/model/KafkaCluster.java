@@ -2058,21 +2058,25 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 pool.nodeRef(nodeId),
                 pool,
                 advertisedHostnames,
-                advertisedPorts
+                advertisedPorts,
+                null,  // customControllerQuorumVoters - not used in this path
+                null   // customAdvertisedListeners - not used in this path
         );
     }
 
     /**
      * Internal method used to generate a Kafka configuration for given broker node.
      *
-     * @param node                  Node reference with Node ID and pod name
-     * @param pool                  Pool to which this node belongs - this is used to get pool-specific settings such as storage
-     * @param advertisedHostnames   Map with advertised hostnames
-     * @param advertisedPorts       Map with advertised ports
+     * @param node                          Node reference with Node ID and pod name
+     * @param pool                          Pool to which this node belongs - this is used to get pool-specific settings such as storage
+     * @param advertisedHostnames           Map with advertised hostnames
+     * @param advertisedPorts               Map with advertised ports
+     * @param customControllerQuorumVoters  Custom controller.quorum.voters string (optional)
+     * @param customAdvertisedListeners     Custom advertised.listeners string (optional)
      *
      * @return  String with the Kafka broker configuration
      */
-    private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
+    private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts, String customControllerQuorumVoters, String customAdvertisedListeners)   {
         KafkaBrokerConfigurationBuilder builder = new KafkaBrokerConfigurationBuilder(reconciliation, node)
                 .withStretch(isStretchMode)
                 .withRackId(rack)
@@ -2081,6 +2085,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         // If stretch mode is enabled and we have a networking provider, set it on the builder
         if (isStretchMode && stretchNetworkingProvider != null) {
             builder = builder.withStretchNetworkingProvider(stretchNetworkingProvider);
+        }
+
+        if (customControllerQuorumVoters != null) {
+            builder.withCustomControllerQuorumVoters(customControllerQuorumVoters);
+        }
+
+        if (customAdvertisedListeners != null) {
+            builder.withCustomAdvertisedListeners(customAdvertisedListeners);
         }
 
         return builder
@@ -2117,8 +2129,9 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return ConfigMap with the shared configuration.
      */
     public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(MetricsAndLogging metricsAndLogging, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts)   {
-        return generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts, null);
+        return generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts, null, null, null);
     }
+
     /**
      * Generates a list of configuration ConfigMaps - one for each broker in the cluster. The ConfigMaps contain the
      * configurations which should be used by given broker. This is used with StrimziPodSets.
@@ -2131,6 +2144,29 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return ConfigMap with the shared configuration.
      */
     public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(MetricsAndLogging metricsAndLogging, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts, String targetClusterId)   {
+        return generatePerBrokerConfigurationConfigMaps(metricsAndLogging, advertisedHostnames, advertisedPorts, targetClusterId, null, null);
+    }
+
+    /**
+     * Generates a list of configuration ConfigMaps - one for each broker in the cluster. The ConfigMaps contain the
+     * configurations which should be used by given broker. This is used with StrimziPodSets.
+     *
+     * @param metricsAndLogging             Object with logging and metrics configuration collected from external user-provided config maps
+     * @param advertisedHostnames           Map with advertised hostnames for different brokers and listeners
+     * @param advertisedPorts               Map with advertised ports for different brokers and listeners
+     * @param targetClusterId               Cluster Id where the clusters are to be created
+     * @param customControllerQuorumVoters  Custom controller.quorum.voters string (optional)
+     * @param customAdvertisedListeners     Map of custom advertised.listeners strings per broker ID (optional)
+     *
+     * @return ConfigMap with the shared configuration.
+     */
+    public List<ConfigMap> generatePerBrokerConfigurationConfigMaps(
+            MetricsAndLogging metricsAndLogging,
+            Map<Integer, Map<String, String>> advertisedHostnames,
+            Map<Integer, Map<String, String>> advertisedPorts,
+            String targetClusterId,
+            String customControllerQuorumVoters,
+            Map<Integer, String> customAdvertisedListeners)   {
         String parsedMetrics = null;
         if (metrics instanceof JmxPrometheusExporterModel exporter) {
             parsedMetrics = exporter.metricsJson(reconciliation, metricsAndLogging.metricsCm());
@@ -2149,7 +2185,14 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
                 }
 
                 data.put(LoggingModel.LOG4J2_CONFIG_MAP_KEY, parsedLogging);
-                data.put(BROKER_CONFIGURATION_FILENAME, generatePerBrokerConfiguration(node, pool, advertisedHostnames, advertisedPorts));
+                data.put(BROKER_CONFIGURATION_FILENAME, generatePerBrokerConfiguration(
+                        node,
+                        pool,
+                        advertisedHostnames,
+                        advertisedPorts,
+                        customControllerQuorumVoters,
+                        customAdvertisedListeners != null ? customAdvertisedListeners.get(node.nodeId()) : null
+                ));
 
                 // List of configured listeners => StrimziPodSets still need this because of OAUTH and how the OAUTH secret
                 // environment variables are parsed in the container bash scripts.
