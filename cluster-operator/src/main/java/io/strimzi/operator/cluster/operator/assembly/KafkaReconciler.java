@@ -666,6 +666,7 @@ public class KafkaReconciler {
      * @param metricsAndLogging Metrics and logging configuration
      * @return                  Future which completes when ConfigMaps are reconciled across all clusters
      */
+    @SuppressWarnings("checkstyle:MethodLength") // Complex async orchestration logic for stretch cluster configuration
     protected Future<Void> stretchPerBrokerKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
         List<Future<Void>> futures = new ArrayList<>();
 
@@ -1896,8 +1897,8 @@ public class KafkaReconciler {
         return scaleDown(kafka.nodes(), strimziPodSetOperator);
     }
 
-        /**
-     * Scales down the Stretch Kafka cluster if needed. 
+    /**
+     * Scales down the Stretch Kafka cluster if needed.
      *
      * @return  Future which completes when the scale-down is finished
      */
