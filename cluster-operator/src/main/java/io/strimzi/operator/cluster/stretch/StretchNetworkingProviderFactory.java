@@ -8,6 +8,7 @@ import io.strimzi.operator.cluster.ClusterOperatorConfig;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.InvalidConfigurationException;
+import io.vertx.core.Future;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -64,15 +65,16 @@ public final class StretchNetworkingProviderFactory {
 
     /**
      * Create a networking provider based on configuration.
+     * This method is async and returns a Future to avoid blocking the event loop.
      *
      * @param operatorConfig Cluster operator configuration
      * @param config Provider-specific configuration
      * @param centralSupplier ResourceOperatorSupplier for central cluster
      * @param remoteResourceOperatorSupplier Supplier for remote cluster operators
-     * @return Initialized provider
+     * @return Future with initialized provider
      * @throws InvalidConfigurationException if configuration is invalid
      */
-    public static StretchNetworkingProvider create(
+    public static Future<StretchNetworkingProvider> create(
             final ClusterOperatorConfig operatorConfig,
             final Map<String, String> config,
             final ResourceOperatorSupplier centralSupplier,
@@ -97,18 +99,17 @@ public final class StretchNetworkingProviderFactory {
         
         StretchNetworkingProvider provider = loadCustomProvider(className, classPath);
         
-        // Initialize the provider
-        try {
-            provider.init(config, centralSupplier, remoteResourceOperatorSupplier)
-                    .toCompletionStage().toCompletableFuture().get();
-            LOGGER.info("Stretch networking provider '{}' initialized successfully",
-                    provider.getProviderName());
-        } catch (Exception e) {
-            throw new InvalidConfigurationException(
-                    "Failed to initialize stretch networking provider '" + className + "': " + e.getMessage(), e);
-        }
-
-        return provider;
+        // Initialize the provider asynchronously
+        return provider.init(config, centralSupplier, remoteResourceOperatorSupplier)
+            .map(v -> {
+                LOGGER.info("Stretch networking provider '{}' initialized successfully",
+                        provider.getProviderName());
+                return provider;
+            })
+            .recover(error -> {
+                throw new InvalidConfigurationException(
+                        "Failed to initialize stretch networking provider '" + className + "': " + error.getMessage(), error);
+            });
     }
 
 
