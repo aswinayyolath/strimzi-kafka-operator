@@ -44,6 +44,11 @@ public class RemoteResourceOperatorSupplier {
     public final Map<String, ResourceOperatorSupplier> remoteResourceOperators = new HashMap<>();
     
     /**
+     * Central cluster Kubernetes client.
+     */
+    private final KubernetesClient centralClient;
+
+    /**
      * Constructor.
      * 
      * @param vertx                    Vert.x instance
@@ -61,6 +66,8 @@ public class RemoteResourceOperatorSupplier {
             String operatorName, 
             String centralClusterId) {
         
+        this.centralClient = centralClient;
+
         if (remoteClientSupplier == null) {
             throw new IllegalArgumentException("remoteClientSupplier cannot be null");
         }
@@ -117,5 +124,23 @@ public class RemoteResourceOperatorSupplier {
      */
     public ResourceOperatorSupplier get(String clusterId) {
         return remoteResourceOperators.get(clusterId);
+    }
+
+    /**
+     * Get the central cluster Kubernetes client.
+     *
+     * @return Central cluster Kubernetes client
+     */
+    public KubernetesClient getCentralClient() {
+        return centralClient;
+    }
+
+    /**
+     * Get the map of remote resource operators.
+     *
+     * @return Map of remote resource operators
+     */
+    public Map<String, ResourceOperatorSupplier> getRemoteResourceOperators() {
+        return remoteResourceOperators;
     }
 }

@@ -19,7 +19,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Validator for stretch cluster configuration and runtime connectivity.
@@ -367,7 +366,7 @@ public class StretchClusterValidator {
         List<Future<LatencyMeasurement>> latencyChecks = new ArrayList<>();
         for (String clusterId : remoteSupplier.remoteResourceOperators.keySet()) {
             latencyChecks.add(measureClusterLatency(
-                reconciliation, networkingProvider, namespace, clusterId
+                reconciliation, networkingProvider, remoteSupplier, namespace, clusterId
             ));
         }
 
@@ -393,14 +392,15 @@ public class StretchClusterValidator {
     }
 
     /**
-     * Measures network latency to a specific remote cluster.
+     * Measures actual pod-to-pod network latency to a specific remote cluster.
      *
-     * Creates a temporary test service using the networking provider, measures
-     * the time to create and discover the endpoint, then cleans up.
-     * This simulates the actual path Kafka will use.
+     * Deploys test pods in both central and remote clusters, uses the networking
+     * provider to expose the remote pod, then executes real TCP connection tests
+     * from the central pod to measure data plane latency (not control plane API latency).
      *
      * @param reconciliation Reconciliation context
      * @param provider Networking provider
+     * @param remoteSupplier Remote resource operator supplier
      * @param namespace Namespace for test resources
      * @param clusterId Target cluster ID
      * @return Future with LatencyMeasurement
@@ -408,57 +408,81 @@ public class StretchClusterValidator {
     private Future<LatencyMeasurement> measureClusterLatency(
             final Reconciliation reconciliation,
             final StretchNetworkingProvider provider,
+            final RemoteResourceOperatorSupplier remoteSupplier,
             final String namespace,
             final String clusterId) {
 
         // Use clusterId in name to prevent collisions
         String testPodName = "strimzi-latency-test-" + clusterId + "-" + System.currentTimeMillis();
+        String centralTestPodName = "strimzi-latency-test-central-" + System.currentTimeMillis();
         Map<String, Integer> testPorts = new HashMap<>();
-        testPorts.put("test", 9999);
+        testPorts.put("test", 8080);
 
-        long startTime = System.nanoTime();
+        LOGGER.debugCr(reconciliation, "Measuring pod-to-pod latency to cluster '{}' using test pods",
+                      clusterId);
 
-        LOGGER.debugCr(reconciliation, "Measuring latency to cluster '{}' using test pod '{}'",
-                      clusterId, testPodName);
+        NetworkLatencyTester tester = new NetworkLatencyTester(vertx);
 
-        // Step 1: Create networking resources (simulates what happens for Kafka pods)
-        return provider.createNetworkingResources(
-                reconciliation, namespace, testPodName, clusterId, testPorts
-            )
+        // Get operators for both clusters
+        io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator centralPodOp =
+            new io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator(vertx,
+                remoteSupplier.getCentralClient());
+        io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier remoteOps =
+            remoteSupplier.getRemoteResourceOperators().get(clusterId);
+
+        if (remoteOps == null) {
+            return Future.failedFuture(new RuntimeException(
+                "No remote operator found for cluster: " + clusterId));
+        }
+
+        io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator remotePodOp =
+            remoteOps.podOperations;
+
+        // Step 1: Deploy test pod in remote cluster
+        return tester.deployTestPod(reconciliation, remotePodOp, namespace, testPodName, clusterId)
+            .compose(remotePod -> {
+                // Step 2: Create networking resources to expose remote pod
+                return provider.createNetworkingResources(
+                    reconciliation, namespace, testPodName, clusterId, testPorts
+                );
+            })
             .compose(resources -> {
-                // Step 2: Extract actual service name from created resources
+                // Step 3: Discover endpoint for remote pod
                 String serviceName = extractServiceName(resources, testPodName);
-
                 if (serviceName == null) {
                     return Future.failedFuture(new RuntimeException(
-                        "No Service found in networking resources for test pod: " + testPodName +
-                        ". Provider may not have created a Service resource."
-                    ));
+                        "No Service found in networking resources for test pod: " + testPodName));
                 }
 
-                LOGGER.debugCr(reconciliation,
-                    "Found service '{}' for latency test to cluster '{}'",
-                    serviceName, clusterId);
-
-                // Step 3: Discover endpoint (simulates endpoint discovery during reconciliation)
                 return provider.discoverPodEndpoint(
                     reconciliation, namespace, serviceName, clusterId, "test"
                 );
             })
             .compose(endpoint -> {
-                // Calculate total latency
-                long endTime = System.nanoTime();
-                long latencyMs = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-
-                LOGGER.debugCr(reconciliation,
-                    "Latency to cluster '{}': {}ms (endpoint: {})",
-                    clusterId, latencyMs, endpoint);
-
-                // Step 4: Clean up test resources
-                return provider.deleteNetworkingResources(
-                        reconciliation, namespace, testPodName, clusterId
-                    )
-                    .map(v -> new LatencyMeasurement(clusterId, latencyMs, endpoint, true));
+                // Step 4: Deploy test pod in central cluster
+                return tester.deployTestPod(reconciliation, centralPodOp, namespace,
+                    centralTestPodName, centralClusterId)
+                    .map(centralPod -> endpoint);
+            })
+            .compose(endpoint -> {
+                // Step 5: Execute actual network latency test from central to remote
+                return tester.measureLatency(reconciliation, remoteSupplier.getCentralClient(),
+                    namespace, centralTestPodName, endpoint, clusterId)
+                    .map(latencyResult -> {
+                        if (!latencyResult.isSuccessful()) {
+                            throw new RuntimeException("Latency measurement failed to endpoint: " + endpoint);
+                        }
+                        // Use median latency for threshold comparison (more robust than average)
+                        return new LatencyMeasurement(clusterId, latencyResult.getMedianMs(),
+                            endpoint, true, latencyResult.getMinMs(), latencyResult.getMaxMs(),
+                            latencyResult.getAvgMs());
+                    });
+            })
+            .compose(measurement -> {
+                // Step 6: Clean up all test resources
+                return cleanupLatencyTestResources(reconciliation, provider, tester,
+                    centralPodOp, remotePodOp, namespace, centralTestPodName, testPodName, clusterId)
+                    .map(measurement);
             })
             .recover(error -> {
                 // If measurement fails, try to clean up and return failure measurement
@@ -467,20 +491,50 @@ public class StretchClusterValidator {
                     clusterId, error.getMessage());
 
                 // Attempt cleanup (best effort)
-                return provider.deleteNetworkingResources(
-                        reconciliation, namespace, testPodName, clusterId
-                    )
+                return cleanupLatencyTestResources(reconciliation, provider, tester,
+                        centralPodOp, remotePodOp, namespace, centralTestPodName, testPodName, clusterId)
                     .recover(cleanupError -> {
                         LOGGER.warnCr(reconciliation,
-                            "Failed to cleanup latency test resources for cluster '{}': {}. " +
-                            "Manual cleanup may be required for test resources with name pattern: {}*",
-                            clusterId, cleanupError.getMessage(), testPodName);
+                            "Failed to cleanup latency test resources for cluster '{}': {}",
+                            clusterId, cleanupError.getMessage());
                         return Future.succeededFuture();
                     })
                     .map(v -> new LatencyMeasurement(
-                        clusterId, Long.MAX_VALUE, "unavailable", false
+                        clusterId, Long.MAX_VALUE, "unavailable", false, -1, -1, -1
                     ));
             });
+    }
+
+    /**
+     * Cleans up all latency test resources.
+     *
+     * @param reconciliation Reconciliation context
+     * @param provider Networking provider
+     * @param tester Latency tester
+     * @param centralPodOp Central pod operator
+     * @param remotePodOp Remote pod operator
+     * @param namespace Namespace
+     * @param centralPodName Central test pod name
+     * @param remotePodName Remote test pod name
+     * @param clusterId Cluster ID
+     * @return Future that completes when cleanup is done
+     */
+    private Future<Void> cleanupLatencyTestResources(
+            Reconciliation reconciliation,
+            StretchNetworkingProvider provider,
+            NetworkLatencyTester tester,
+            io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator centralPodOp,
+            io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator remotePodOp,
+            String namespace,
+            String centralPodName,
+            String remotePodName,
+            String clusterId) {
+
+        return Future.all(
+            tester.deleteTestPod(reconciliation, centralPodOp, namespace, centralPodName),
+            tester.deleteTestPod(reconciliation, remotePodOp, namespace, remotePodName),
+            provider.deleteNetworkingResources(reconciliation, namespace, remotePodName, clusterId)
+        ).mapEmpty();
     }
 
     /**
@@ -530,20 +584,23 @@ public class StretchClusterValidator {
             }
 
             String latencyInfo = String.format(
-                "%s <-> %s: %dms (endpoint: %s)",
-                centralClusterId, m.getClusterId(), m.getLatencyMs(), m.getEndpoint()
+                "%s <-> %s: min=%dms, median=%dms, avg=%dms, max=%dms (endpoint: %s)",
+                centralClusterId, m.getClusterId(), m.getMinMs(), m.getLatencyMs(),
+                m.getAvgMs(), m.getMaxMs(), m.getEndpoint()
             );
 
             if (m.getLatencyMs() > maxLatencyMs) {
                 errors.add(String.format(
-                    "Cluster '%s': %dms latency exceeds maximum %dms",
-                    m.getClusterId(), m.getLatencyMs(), maxLatencyMs
+                    "Cluster '%s': %dms median latency exceeds maximum %dms (min=%dms, median=%dms, avg=%dms, max=%dms)",
+                    m.getClusterId(), m.getLatencyMs(), maxLatencyMs,
+                    m.getMinMs(), m.getLatencyMs(), m.getAvgMs(), m.getMaxMs()
                 ));
                 detailedInfo.append(latencyInfo).append(" - EXCEEDS LIMIT; ");
             } else if (m.getLatencyMs() > warningLatencyMs) {
                 warnings.add(String.format(
-                    "Cluster '%s': %dms latency exceeds warning threshold %dms",
-                    m.getClusterId(), m.getLatencyMs(), warningLatencyMs
+                    "Cluster '%s': %dms median latency exceeds warning threshold %dms (min=%dms, median=%dms, avg=%dms, max=%dms)",
+                    m.getClusterId(), m.getLatencyMs(), warningLatencyMs,
+                    m.getMinMs(), m.getLatencyMs(), m.getAvgMs(), m.getMaxMs()
                 ));
                 detailedInfo.append(latencyInfo).append(" - WARNING; ");
             } else {
@@ -589,18 +646,26 @@ public class StretchClusterValidator {
 
     /**
      * Represents a network latency measurement to a cluster.
+     * Includes statistical data (min/median/max/avg) from multiple samples.
      */
     private static class LatencyMeasurement {
         private final String clusterId;
-        private final long latencyMs;
+        private final long latencyMs;  // Median latency (used for threshold comparison)
         private final String endpoint;
         private final boolean successful;
+        private final long minMs;
+        private final long maxMs;
+        private final long avgMs;
 
-        LatencyMeasurement(String clusterId, long latencyMs, String endpoint, boolean successful) {
+        LatencyMeasurement(String clusterId, long latencyMs, String endpoint, boolean successful,
+                          long minMs, long maxMs, long avgMs) {
             this.clusterId = clusterId;
-            this.latencyMs = latencyMs;
+            this.latencyMs = latencyMs;  // This is the median
             this.endpoint = endpoint;
             this.successful = successful;
+            this.minMs = minMs;
+            this.maxMs = maxMs;
+            this.avgMs = avgMs;
         }
 
         public String getClusterId() {
@@ -608,7 +673,7 @@ public class StretchClusterValidator {
         }
 
         public long getLatencyMs() {
-            return latencyMs;
+            return latencyMs;  // Returns median
         }
 
         public String getEndpoint() {
@@ -617,6 +682,18 @@ public class StretchClusterValidator {
 
         public boolean isSuccessful() {
             return successful;
+        }
+
+        public long getMinMs() {
+            return minMs;
+        }
+
+        public long getMaxMs() {
+            return maxMs;
+        }
+
+        public long getAvgMs() {
+            return avgMs;
         }
     }
 
