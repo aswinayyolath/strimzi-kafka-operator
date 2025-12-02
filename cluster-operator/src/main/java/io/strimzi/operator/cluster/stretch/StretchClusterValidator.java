@@ -7,10 +7,9 @@ package io.strimzi.operator.cluster.stretch;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.strimzi.api.kafka.model.kafka.Kafka;
 import io.strimzi.api.kafka.model.nodepool.KafkaNodePool;
+import io.strimzi.operator.common.ReconciliationLogger;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -24,8 +23,8 @@ import java.util.Set;
  */
 public class StretchClusterValidator {
     /** Logger instance. */
-    private static final Logger LOGGER =
-        LogManager.getLogger(StretchClusterValidator.class);
+    private static final ReconciliationLogger LOGGER =
+        ReconciliationLogger.create(StretchClusterValidator.class);
 
     /** Vert.x instance. */
     private final Vertx vertx;
@@ -323,7 +322,6 @@ public class StretchClusterValidator {
     /**
      * Validate connectivity to a single cluster.
      *
-     * @param reconciliation Reconciliation context
      * @param clusterId Cluster ID
      * @param client KubernetesClient for the cluster
      * @return Future with ValidationResult
@@ -335,8 +333,6 @@ public class StretchClusterValidator {
         return vertx.executeBlocking(() -> {
             try {
                 // Check API server reachable by getting version
-                LOGGER.debug("Validating connectivity to cluster {}",
-                    clusterId);
                 client.getKubernetesVersion();
 
                 // Check required CRDs exist
@@ -355,12 +351,9 @@ public class StretchClusterValidator {
                     );
                 }
 
-                LOGGER.debug("Cluster {} connectivity validated "
-                    + "successfully", clusterId);
                 return ValidationResult.success();
 
             } catch (Exception e) {
-                LOGGER.warn("Failed to connect to cluster {}: {}", clusterId, e.getMessage());
                 return ValidationResult.error(
                     "ConnectivityError",
                     String.format("Cannot connect to cluster '%s': %s. "

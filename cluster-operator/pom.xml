@@ -343,7 +343,7 @@
                                 <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-common</ignoredUnusedDeclaredDependency>
                                 <!-- Needed at runtime by Fabric8 -->
                                 <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-coordination</ignoredUnusedDeclaredDependency>
-                                 <!-- Needed for CRD validation in StretchClusterValidator -->
+                                <!-- Needed for CRD validation in StretchClusterValidator -->
                                 <ignoredUnusedDeclaredDependency>io.fabric8:kubernetes-model-apiextensions</ignoredUnusedDeclaredDependency>
                             </ignoredNonTestScopedDependencies>
                         </configuration>

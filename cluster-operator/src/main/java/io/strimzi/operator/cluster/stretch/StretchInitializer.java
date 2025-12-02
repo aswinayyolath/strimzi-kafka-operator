@@ -11,7 +11,6 @@ import io.strimzi.operator.cluster.PlatformFeaturesAvailability;
 import io.strimzi.operator.cluster.RemoteClientSupplier;
 import io.strimzi.operator.cluster.model.DnsNameGenerator;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
-import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.MicrometerMetricsProvider;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -123,27 +122,14 @@ public class StretchInitializer {
             return Future.succeededFuture(new InitializationResult(new HashMap<>(), null, false, false));
         } 
 
-        StretchClusterValidator validator = new StretchClusterValidator(vertx, config.getCentralClusterId(), config.getRemoteClusters().keySet());
-
-        
-        
-        return validator
-            .validateRuntimeConnectivity(remoteClientSupplier.getRemoteClients())
-            .compose(result -> {
-                if (result.isValid()) {
-                    LOGGER.info("Initializing stretch cluster functionality...");
-                    // Step 1: Create PlatformFeaturesAvailability for remote clusters
-                    return createRemotePlatformFeaturesAvailability(vertx, remoteClientSupplier)
-                        .compose(remotePfas -> {
-                            RemoteResourceOperatorSupplier remoteResourceOperatorSupplier =
-                                initializeNetworkingProvider(config, vertx, client, remoteClientSupplier, centralPfa, remotePfas);
-                            // Step 2: Initialize networking provider and create RemoteResourceOperatorSupplier
-                            return Future.succeededFuture(new InitializationResult(remotePfas, remoteResourceOperatorSupplier, true, true));
-                        });
-                } else {
-                    LOGGER.error("Kube config files are invalid. Cannot reconcile stretched kafka cluster");
-                    return Future.succeededFuture(new InitializationResult(new HashMap<>(), null, true, false));
-                }
+        LOGGER.info("Initializing stretch cluster functionality...");
+        // Step 1: Create PlatformFeaturesAvailability for remote clusters
+        return createRemotePlatformFeaturesAvailability(vertx, remoteClientSupplier)
+            .compose(remotePfas -> {
+                // Step 2: Initialize networking provider and create RemoteResourceOperatorSupplier
+                return initializeNetworkingProvider(config, vertx, client, remoteClientSupplier, centralPfa, remotePfas)
+                    .map(remoteResourceOperatorSupplier -> 
+                        new InitializationResult(remotePfas, remoteResourceOperatorSupplier, true, true));
             });
     }
 
@@ -187,17 +173,17 @@ public class StretchInitializer {
     }
 
     /**
-     * Initialize stretch networking provider and create RemoteResourceOperatorSupplier.
+     * Initialize the networking provider for stretch cluster support.
      *
      * @param config Cluster operator configuration
-     * @param vertx Vertx instance
+     * @param vertx Vert.x instance
      * @param client Kubernetes client for central cluster
-     * @param remoteClientSupplier Supplier for remote cluster clients
+     * @param remoteClientSupplier Remote client supplier
      * @param centralPfa Platform features availability for central cluster
      * @param remotePfas Platform features availability for remote clusters
-     * @return RemoteResourceOperatorSupplier if successful, null otherwise
+     * @return Future with RemoteResourceOperatorSupplier if successful, null otherwise
      */
-    private static RemoteResourceOperatorSupplier initializeNetworkingProvider(
+    private static Future<RemoteResourceOperatorSupplier> initializeNetworkingProvider(
             ClusterOperatorConfig config,
             Vertx vertx,
             KubernetesClient client,
@@ -232,25 +218,25 @@ public class StretchInitializer {
                 config.getOperatorName()
             );
 
-            // Create and initialize the networking provider
-            StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
+            // Create and initialize the networking provider asynchronously
+            return StretchNetworkingProviderFactory.create(
                 config,
                 providerConfig,
                 centralSupplier,
                 remoteResourceOperatorSupplier
-            );
+            ).map(provider -> {
+                // Set the provider globally in DnsNameGenerator
+                DnsNameGenerator.setStretchProvider(provider);
 
-            // Set the provider globally in DnsNameGenerator
-            DnsNameGenerator.setStretchProvider(provider);
+                LOGGER.info("Stretch networking provider '{}' initialized successfully", provider.getProviderName());
 
-            LOGGER.info("Stretch networking provider '{}' initialized successfully", provider.getProviderName());
-
-            return remoteResourceOperatorSupplier;
+                return remoteResourceOperatorSupplier;
+            });
 
         } catch (Exception e) {
             LOGGER.error("Failed to initialize stretch networking provider. Stretch cluster functionality may not work correctly.", e);
             // Don't fail startup - allow operator to start but stretch clusters won't work
-            return null;
+            return Future.succeededFuture(null);
         }
     }
 

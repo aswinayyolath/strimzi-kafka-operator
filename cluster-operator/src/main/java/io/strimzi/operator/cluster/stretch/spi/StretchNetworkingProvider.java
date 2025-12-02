@@ -309,33 +309,6 @@ public interface StretchNetworkingProvider {
     );
 
     /**
-     * Generate additional SANs (Subject Alternative Names) for TLS certificates.
-     *
-     * <p>Different providers require different SANs to be included in broker certificates:</p>
-     * <ul>
-     *   <li><b>NodePort:</b> Node IPs (e.g., {@code ["10.21.37.21", "10.21.37.22"]})</li>
-     *   <li><b>LoadBalancer:</b> LoadBalancer IPs (e.g., {@code ["10.21.50.10"]})</li>
-     *   <li><b>MCS:</b> DNS names (e.g., {@code ["pod.cluster-1.svc.clusterset.local"]})</li>
-     * </ul>
-     *
-     * <p>These SANs will be added to the broker's TLS certificate to ensure clients
-     * can verify the certificate when connecting via the external endpoint.</p>
-     *
-     * @param reconciliation Reconciliation context for logging. Never null.
-     * @param namespace Kubernetes namespace. Never null or empty.
-     * @param podName Pod name. Never null or empty.
-     * @param clusterId Cluster ID. Never null or empty.
-     * @return Future with list of additional SANs. May return an empty list if no additional
-     *         SANs are needed. Return a failed Future if SAN generation fails.
-     */
-    Future<List<String>> generateCertificateSans(
-        Reconciliation reconciliation,
-        String namespace,
-        String podName,
-        String clusterId
-    );
-
-    /**
      * Delete networking resources for a pod.
      *
      * <p>This method deletes all networking resources that were created by

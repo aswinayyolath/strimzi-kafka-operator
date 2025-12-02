@@ -186,26 +186,6 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     }
     
     @Override
-    public Future<List<String>> generateCertificateSans(
-            Reconciliation reconciliation,
-            String namespace,
-            String podName,
-            String clusterId) {
-        
-        if (!initialized) {
-            return Future.failedFuture(new IllegalStateException("Provider not initialized"));
-        }
-        
-        // Generate SANs for TLS certificates
-        List<String> sans = new ArrayList<>();
-        sans.add(generatePodDnsName(namespace, podName + "-svc", podName, clusterId));
-        sans.add(generateServiceDnsName(namespace, podName + "-svc", clusterId));
-        
-        LOGGER.info("Generated certificate SANs for pod {}: {}", podName, sans);
-        return Future.succeededFuture(sans);
-    }
-    
-    @Override
     public Future<Void> deleteNetworkingResources(
             Reconciliation reconciliation,
             String namespace,

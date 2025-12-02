@@ -84,7 +84,6 @@ import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.NodeUtils;
 import io.strimzi.operator.common.model.StatusDiff;
-import io.strimzi.operator.common.model.StatusUtils;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -101,6 +100,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -190,9 +190,6 @@ public class KafkaReconciler {
     private final KafkaAutoRebalanceStatus kafkaAutoRebalanceStatus;
     private final Map<String, List<String>> stretchSecretsToDelete = new HashMap<>();
     private final Map<String, String> gcConfigMapUids = new HashMap<>(); // Store GC ConfigMap UIDs by cluster ID
-
-    // Stretch cluster state
-    private io.strimzi.operator.cluster.stretch.StretchClusterValidator validator;
 
     /* test */ boolean isStretchMode;
     /* test */ String stretchCentralClusterId;
@@ -300,7 +297,6 @@ public class KafkaReconciler {
             }
         }
 
-        this.validator = new io.strimzi.operator.cluster.stretch.StretchClusterValidator(vertx, centralClusterId, remoteClusterIds);
 
 
         // Store suppliers for use in stretch listener reconciler
@@ -343,47 +339,6 @@ public class KafkaReconciler {
         this.stretchCentralClusterId = centralClusterId;
     }
 
-        /**
-         * Handle validation errors by updating Kafka CR status with error details.
-         *
-         * @param reconciliation Reconciliation context
-         * @param kafka Kafka CR
-         * @param result Validation result containing error details
-         * @return Future with KafkaStatus containing error condition
-         */
-    private Future<Void> handleValidationError(
-            KafkaStatus status,
-            io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result) {
-
-        LOGGER.errorOp("{}: Stretch cluster validation failed: {}", 
-            reconciliation, result.getErrorMessage());
-
-        // Add Ready: False condition
-        io.strimzi.api.kafka.model.common.Condition readyCondition = 
-            new io.strimzi.api.kafka.model.common.ConditionBuilder()
-                .withType("Ready")
-                .withStatus("False")
-                .withReason(result.getErrorCode())
-                .withMessage(result.getErrorMessage())
-                .withLastTransitionTime(StatusUtils.iso8601Now())
-                .build();
-
-        // Add StretchCluster: False condition to indicate stretch cluster validation failed
-        io.strimzi.api.kafka.model.common.Condition stretchCondition = 
-            new io.strimzi.api.kafka.model.common.ConditionBuilder()
-                .withType("StretchCluster")
-                .withStatus("False")
-                .withReason("InvalidStretchConfiguration")
-                .withMessage("Stretch cluster validation failed: " + result.getErrorMessage())
-                .withLastTransitionTime(StatusUtils.iso8601Now())
-                .build();
-
-        status.setConditions(List.of(readyCondition, stretchCondition));
-        status.setObservedGeneration(kafkaCr.getMetadata().getGeneration());
-
-        return Future.succeededFuture();
-    }
-
     /**
      * Helper method to select the appropriate PodOperator for a cluster.
      *
@@ -398,10 +353,10 @@ public class KafkaReconciler {
     }
 
     /**
-     * Helper method to select the appropriate PodOperator for a cluster.
+     * Helper method to select the appropriate ClusterRoleBindingOperator for a cluster.
      *
      * @param clusterId The cluster ID
-     * @return PodOperator for the cluster
+     * @return ClusterRoleBindingOperator for the cluster
      */
     private ClusterRoleBindingOperator selectClusterRoleBindingOperator(String clusterId) {
         if (clusterId.equals(stretchCentralClusterId)) {
@@ -665,105 +620,172 @@ public class KafkaReconciler {
      * @param metricsAndLogging Metrics and logging configuration
      * @return                  Future which completes when ConfigMaps are reconciled across all clusters
      */
+    @SuppressWarnings("checkstyle:MethodLength") // Complex async orchestration logic for stretch cluster configuration
     protected Future<Void> stretchPerBrokerKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
         List<Future<Void>> futures = new ArrayList<>();
 
-        for (String targetClusterId : clusterIds) {
-            ConfigMapOperator configMapOp = selectConfigMapOperator(targetClusterId);
+        // Prepare futures for async configuration generation
+        Future<Map<Integer, String>> advertisedListenersFuture = Future.succeededFuture(Collections.emptyMap());
+        Future<String> quorumVotersFuture = Future.succeededFuture(null);
 
-            // Skip if operator is null (cluster not available)
-            if (configMapOp == null) {
-                LOGGER.warnCr(reconciliation, "Skipping per-broker configuration ConfigMaps reconciliation for remote cluster '{}' - cluster not available", targetClusterId);
-                continue;
+        if (networkingProvider != null) {
+            // Generate advertised listeners for all brokers
+            List<Future<Map.Entry<Integer, String>>> listenerFutures = new ArrayList<>();
+            String namespace = reconciliation.namespace();
+
+            for (NodeRef node : kafka.brokerNodes()) {
+                Map<String, String> listeners = new HashMap<>();
+                // Add standard listeners
+                listeners.put("REPLICATION-9091", "replication");
+                // Add user configured listeners
+                for (GenericKafkaListener listener : kafka.getListeners()) {
+                    listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH) + "-" + listener.getPort(), listener.getName());
+                }
+
+                String clusterId = getClusterIdForNode(node);
+                listenerFutures.add(
+                    networkingProvider.generateAdvertisedListeners(
+                        reconciliation, namespace, node.podName(), clusterId, listeners
+                    ).map(s -> Map.entry(node.nodeId(), s))
+                );
             }
 
-            boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
+            advertisedListenersFuture = Future.join(listenerFutures)
+                .map(result -> {
+                    Map<Integer, String> map = new HashMap<>();
+                    for (int i = 0; i < result.size(); i++) {
+                        Map.Entry<Integer, String> entry = result.resultAt(i);
+                        map.put(entry.getKey(), entry.getValue());
+                    }
+                    return map;
+                });
 
-            List<ConfigMap> generatedConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
-                metricsAndLogging, 
-                listenerReconciliationResults.advertisedHostnames, 
-                listenerReconciliationResults.advertisedPorts, 
-                targetClusterId
-            );
-
-            // Add GC ConfigMap as owner for remote cluster ConfigMaps
-            final List<ConfigMap> clusterConfigMaps;
-            if (!isCentral) {
-                clusterConfigMaps = addGarbageCollectorOwnerReference(targetClusterId, generatedConfigMaps);
-            } else {
-                clusterConfigMaps = generatedConfigMaps;
+            // Generate quorum voters
+            List<io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider.ControllerPodInfo> controllerInfos = new ArrayList<>();
+            for (NodeRef node : kafka.controllerNodes()) {
+                controllerInfos.add(new io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider.ControllerPodInfo(
+                    node.nodeId(), node.podName(), getClusterIdForNode(node)
+                ));
             }
-
-            LOGGER.infoOp("Desired ConfigMaps =");
-            LOGGER.infoOp(clusterConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
-
-            futures.add(
-                configMapOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
-                    .compose(existingConfigMaps -> {
-
-                        LOGGER.infoOp("Existing ConfigMaps =");
-                        LOGGER.infoOp(existingConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
-
-                        List<Future<?>> ops = new ArrayList<>();
-
-                        // Delete unwanted ConfigMaps
-                        List<String> desiredNames = new ArrayList<>();
-                        desiredNames.add(KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()));
-                        desiredNames.add(KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc"); // Don't delete GC ConfigMap
-                        desiredNames.addAll(clusterConfigMaps.stream().map(cm -> cm.getMetadata().getName()).toList());
-
-                        for (ConfigMap cm : existingConfigMaps) {
-                            if (!desiredNames.contains(cm.getMetadata().getName())) {
-                                LOGGER.debugCr(reconciliation, "Deleting unwanted ConfigMap {} in cluster {}", 
-                                        cm.getMetadata().getName(), targetClusterId);
-                                ops.add(configMapOp.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
-                            }
-                        }
-
-                        // Create/update ConfigMaps and store hashes
-                        for (ConfigMap cm : clusterConfigMaps) {
-                            String cmName = cm.getMetadata().getName();
-                            int nodeId = ReconcilerUtils.getPodIndexFromPodName(cmName);
-                            KafkaPool pool = kafka.nodePoolForNodeId(nodeId);
-
-                            String nodeConfiguration = "";
-
-                            if (pool.isBroker()) {
-                                nodeConfiguration = listenerReconciliationResults.advertisedHostnames
-                                        .get(nodeId)
-                                        .entrySet()
-                                        .stream()
-                                        .map(kv -> kv.getKey() + "://" + kv.getValue())
-                                        .sorted()
-                                        .collect(Collectors.joining(" "));
-                                nodeConfiguration += listenerReconciliationResults.advertisedPorts
-                                        .get(nodeId)
-                                        .entrySet()
-                                        .stream()
-                                        .map(kv -> kv.getKey() + "://" + kv.getValue())
-                                        .sorted()
-                                        .collect(Collectors.joining(" "));
-                                nodeConfiguration += cm.getData().getOrDefault(KafkaCluster.BROKER_LISTENERS_FILENAME, "");
-                            }
-
-                            KafkaConfiguration kc = KafkaConfiguration.unvalidated(reconciliation, cm.getData().getOrDefault(KafkaCluster.BROKER_CONFIGURATION_FILENAME, ""));
-                            nodeConfiguration += kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString();
-
-                            if (pool.isController() && !pool.isBroker()) {
-                                nodeConfiguration = kc.controllerConfigsWithValues().toString();
-                            }
-
-                            this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
-
-                            ops.add(configMapOp.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
-                        }
-
-                        return Future.join(ops).mapEmpty();
-                    })
+            quorumVotersFuture = networkingProvider.generateQuorumVoters(
+                reconciliation, namespace, controllerInfos, "replication"
             );
         }
 
-        return Future.join(futures).mapEmpty();
+        return Future.join(advertisedListenersFuture, quorumVotersFuture)
+            .compose(res -> {
+                Map<Integer, String> customAdvertisedListeners = res.resultAt(0);
+                String customQuorumVoters = res.resultAt(1);
+
+                for (String targetClusterId : clusterIds) {
+                    ConfigMapOperator configMapOp = selectConfigMapOperator(targetClusterId);
+
+                    // Skip if operator is null (cluster not available)
+                    if (configMapOp == null) {
+                        LOGGER.warnCr(reconciliation, "Skipping per-broker configuration ConfigMaps reconciliation for remote cluster '{}' - cluster not available", targetClusterId);
+                        continue;
+                    }
+
+                    boolean isCentral = targetClusterId.equals(stretchCentralClusterId);
+
+                    List<ConfigMap> generatedConfigMaps = kafka.generatePerBrokerConfigurationConfigMaps(
+                        metricsAndLogging,
+                        listenerReconciliationResults.advertisedHostnames,
+                        listenerReconciliationResults.advertisedPorts,
+                        targetClusterId,
+                        customQuorumVoters,
+                        customAdvertisedListeners
+                    );
+
+                    // Add GC ConfigMap as owner for remote cluster ConfigMaps
+                    final List<ConfigMap> clusterConfigMaps;
+                    if (!isCentral) {
+                        clusterConfigMaps = addGarbageCollectorOwnerReference(targetClusterId, generatedConfigMaps);
+                    } else {
+                        clusterConfigMaps = generatedConfigMaps;
+                    }
+
+                    LOGGER.debugCr(reconciliation, "Desired ConfigMaps for cluster {}: {}", targetClusterId,
+                        clusterConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
+
+                    futures.add(
+                        configMapOp.listAsync(reconciliation.namespace(), kafka.getSelectorLabels())
+                            .compose(existingConfigMaps -> {
+
+                                LOGGER.debugCr(reconciliation, "Existing ConfigMaps in cluster {}: {}", targetClusterId,
+                                    existingConfigMaps.stream().map(x -> x.getMetadata().getName()).collect(Collectors.toList()));
+
+                                List<Future<?>> ops = new ArrayList<>();
+
+                                // Delete unwanted ConfigMaps
+                                List<String> desiredNames = new ArrayList<>();
+                                desiredNames.add(KafkaResources.kafkaMetricsAndLogConfigMapName(reconciliation.name()));
+                                desiredNames.add(KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc"); // Don't delete GC ConfigMap
+                                desiredNames.addAll(clusterConfigMaps.stream().map(cm -> cm.getMetadata().getName()).toList());
+
+                                for (ConfigMap cm : existingConfigMaps) {
+                                    if (!desiredNames.contains(cm.getMetadata().getName())) {
+                                        LOGGER.debugCr(reconciliation, "Deleting unwanted ConfigMap {} in cluster {}",
+                                                cm.getMetadata().getName(), targetClusterId);
+                                        ops.add(configMapOp.deleteAsync(reconciliation, reconciliation.namespace(), cm.getMetadata().getName(), true));
+                                    }
+                                }
+
+                                // Create/update ConfigMaps and store hashes
+                                for (ConfigMap cm : clusterConfigMaps) {
+                                    String cmName = cm.getMetadata().getName();
+                                    int nodeId = ReconcilerUtils.getPodIndexFromPodName(cmName);
+                                    KafkaPool pool = kafka.nodePoolForNodeId(nodeId);
+
+                                    String nodeConfiguration = "";
+
+                                    if (pool.isBroker()) {
+                                        // Use custom advertised listeners if available, otherwise use standard logic
+                                        if (customAdvertisedListeners != null && customAdvertisedListeners.containsKey(nodeId)) {
+                                            // For hash calculation, we need to include the advertised listeners
+                                            nodeConfiguration = customAdvertisedListeners.get(nodeId);
+                                        } else {
+                                            nodeConfiguration = listenerReconciliationResults.advertisedHostnames
+                                                    .get(nodeId)
+                                                    .entrySet()
+                                                    .stream()
+                                                    .map(kv -> kv.getKey() + "://" + kv.getValue())
+                                                    .sorted()
+                                                    .collect(Collectors.joining(" "));
+                                            nodeConfiguration += listenerReconciliationResults.advertisedPorts
+                                                    .get(nodeId)
+                                                    .entrySet()
+                                                    .stream()
+                                                    .map(kv -> kv.getKey() + "://" + kv.getValue())
+                                                    .sorted()
+                                                    .collect(Collectors.joining(" "));
+                                        }
+                                        nodeConfiguration += cm.getData().getOrDefault(KafkaCluster.BROKER_LISTENERS_FILENAME, "");
+                                    }
+
+                                    KafkaConfiguration kc = KafkaConfiguration.unvalidated(reconciliation, cm.getData().getOrDefault(KafkaCluster.BROKER_CONFIGURATION_FILENAME, ""));
+                                    nodeConfiguration += kc.unknownConfigsWithValues(kafka.getKafkaVersion()).toString();
+
+                                    if (pool.isController() && !pool.isBroker()) {
+                                        nodeConfiguration = kc.controllerConfigsWithValues().toString();
+                                    }
+
+                                    if (customQuorumVoters != null) {
+                                        nodeConfiguration += customQuorumVoters;
+                                    }
+
+                                    this.brokerConfigurationHash.put(nodeId, Util.hashStub(nodeConfiguration));
+
+                                    ops.add(configMapOp.reconcile(reconciliation, reconciliation.namespace(), cmName, cm));
+                                }
+
+                                return Future.join(ops).mapEmpty();
+                            })
+                    );
+                }
+
+                return Future.join(futures).mapEmpty();
+            });
     }
 
 
@@ -910,13 +932,6 @@ public class KafkaReconciler {
      * @return              Future which completes when the reconciliation completes
      */
     public Future<Void> reconcileStretchedKafka(KafkaStatus kafkaStatus, Clock clock)    {
-        io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult configResult = 
-            validator.validateKafkaConfiguration(kafkaCr, kafkaNodePoolCrs, true);
-
-        if (!configResult.isValid()) {
-            return handleValidationError(kafkaStatus, configResult);
-        }
-
         return modelWarnings(kafkaStatus)
             .compose(i -> initClientAuthenticationCertificates())
             .compose(i -> stretchGarbageCollectorConfigMap()) // Create garbage collector ConfigMap in remote clusters FIRST
@@ -945,13 +960,7 @@ public class KafkaReconciler {
             .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
             .compose(i -> defaultKafkaQuotas())
             .compose(i -> nodeUnregistration())
-            .compose(i -> metadataVersion(kafkaStatus))
-            .compose(i -> stretchDeletePersistentClaims())
-            .compose(i -> sharedKafkaConfigurationCleanup())
-            .compose(i -> stretchDeleteOldCertificateSecrets())
-            // This has to run after all possible rolling updates which might move the pods to different nodes
-            .compose(i -> nodePortExternalListenerStatus())
-            .compose(i -> stretchListenerStatus()) // Populate listener statuses for stretch clusters
+            .compose(i -> deletePersistentClaims())
             .compose(i -> updateKafkaStatus(kafkaStatus));
     }
 
@@ -1829,14 +1838,33 @@ public class KafkaReconciler {
         return scaleDown(kafka.nodes(), strimziPodSetOperator);
     }
 
-        /**
-         * Scales down the Stretch Kafka cluster if needed. 
-         *
-         * @return  Future which completes when the scale-down is finished
-         */
+    /**
+     * Scales down the Stretch Kafka cluster if needed.
+     *
+     * @return  Future which completes when the scale-down is finished
+     */
     protected Future<Void> stretchScaleDown() {
 
         List<Future<Void>> futures = new ArrayList<>();
+
+        // First, delete networking resources for nodes being scaled down
+        if (networkingProvider != null) {
+            for (KafkaPool pool : kafka.getNodePools()) {
+                String clusterId = pool.getTargetCluster();
+
+                if (clusterId != null) {
+                    for (NodeRef node : pool.scaledDownNodes()) {
+                        final String finalClusterId = clusterId;
+                        futures.add(networkingProvider.deleteNetworkingResources(
+                            reconciliation, reconciliation.namespace(), node.podName(), clusterId
+                        ).recover(e -> {
+                            LOGGER.warnCr(reconciliation, "Failed to delete networking resources for pod {} in cluster {}", node.podName(), finalClusterId, e);
+                            return Future.succeededFuture();
+                        }));
+                    }
+                }
+            }
+        }
 
         for (String targetClusterId : clusterIds) {
             StrimziPodSetOperator podSetOp = selectStrimziPodSetOperator(targetClusterId);
@@ -2762,7 +2790,10 @@ public class KafkaReconciler {
      * @return  Future that completes once the status is updated
      */
     /* test */ Future<Void> updateKafkaStatus(KafkaStatus kafkaStatus) {
-        kafkaStatus.setListeners(listenerReconciliationResults.listenerStatuses);
+        // Only set listener statuses if listener reconciliation has completed
+        if (listenerReconciliationResults != null) {
+            kafkaStatus.setListeners(listenerReconciliationResults.listenerStatuses);
+        }
         kafkaStatus.setKafkaVersion(kafka.getKafkaVersion().version());
         kafkaStatus.setKafkaMetadataState(KafkaMetadataState.KRaft);
 

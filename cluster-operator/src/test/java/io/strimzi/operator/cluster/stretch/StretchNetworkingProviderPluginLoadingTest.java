@@ -497,15 +497,6 @@ public class StretchNetworkingProviderPluginLoadingTest {
         }
         
         @Override
-        public Future<java.util.List<String>> generateCertificateSans(
-                io.strimzi.operator.common.Reconciliation reconciliation,
-                String namespace,
-                String podName,
-                String clusterId) {
-            throw new UnsupportedOperationException("FailingInitProvider is only for testing init() failures");
-        }
-        
-        @Override
         public Future<Void> deleteNetworkingResources(
                 io.strimzi.operator.common.Reconciliation reconciliation,
                 String namespace,
