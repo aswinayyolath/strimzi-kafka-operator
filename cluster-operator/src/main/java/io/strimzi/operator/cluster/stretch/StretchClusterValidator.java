@@ -450,8 +450,15 @@ public class StretchClusterValidator {
                 // Step 3: Discover endpoint for remote pod
                 String serviceName = extractServiceName(resources, testPodName);
                 if (serviceName == null) {
-                    return Future.failedFuture(new RuntimeException(
-                        "No Service found in networking resources for test pod: " + testPodName));
+                    // Fallback: If provider returns empty list (e.g., service already exists),
+                    // try to construct the service name based on provider conventions
+                    // For MCS: <kafka-cluster>-kafka-brokers
+                    // For NodePort: <pod-name>-nodeport
+                    // Since this is a test pod, use the test pod name directly
+                    LOGGER.warnCr(reconciliation,
+                        "No Service found in networking resources for test pod {}, attempting fallback with pod name",
+                        testPodName);
+                    serviceName = testPodName;
                 }
 
                 return provider.discoverPodEndpoint(

@@ -2983,7 +2983,10 @@ public class KafkaReconciler {
      * @return  Future that completes once the status is updated
      */
     /* test */ Future<Void> updateKafkaStatus(KafkaStatus kafkaStatus) {
-        kafkaStatus.setListeners(listenerReconciliationResults.listenerStatuses);
+        // Only set listener statuses if listener reconciliation has completed
+        if (listenerReconciliationResults != null) {
+            kafkaStatus.setListeners(listenerReconciliationResults.listenerStatuses);
+        }
         kafkaStatus.setKafkaVersion(kafka.getKafkaVersion().version());
         kafkaStatus.setKafkaMetadataState(KafkaMetadataState.KRaft);
 
