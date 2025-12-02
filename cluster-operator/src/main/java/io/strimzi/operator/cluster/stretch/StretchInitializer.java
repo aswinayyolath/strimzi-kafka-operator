@@ -122,27 +122,14 @@ public class StretchInitializer {
             return Future.succeededFuture(new InitializationResult(new HashMap<>(), null, false, false));
         } 
 
-        StretchClusterValidator validator = new StretchClusterValidator(vertx, config.getCentralClusterId(), config.getRemoteClusters().keySet());
-
-        
-        
-        return validator
-            .validateRuntimeConnectivity(remoteClientSupplier.getRemoteClients())
-            .compose(result -> {
-                if (result.isValid()) {
-                    LOGGER.info("Initializing stretch cluster functionality...");
-                    // Step 1: Create PlatformFeaturesAvailability for remote clusters
-                    return createRemotePlatformFeaturesAvailability(vertx, remoteClientSupplier)
-                        .compose(remotePfas -> {
-                            // Step 2: Initialize networking provider and create RemoteResourceOperatorSupplier
-                            return initializeNetworkingProvider(config, vertx, client, remoteClientSupplier, centralPfa, remotePfas)
-                                .map(remoteResourceOperatorSupplier -> 
-                                    new InitializationResult(remotePfas, remoteResourceOperatorSupplier, true, true));
-                        });
-                } else {
-                    LOGGER.error("Kube config files are invalid. Cannot reconcile stretched kafka cluster");
-                    return Future.succeededFuture(new InitializationResult(new HashMap<>(), null, true, false));
-                }
+        LOGGER.info("Initializing stretch cluster functionality...");
+        // Step 1: Create PlatformFeaturesAvailability for remote clusters
+        return createRemotePlatformFeaturesAvailability(vertx, remoteClientSupplier)
+            .compose(remotePfas -> {
+                // Step 2: Initialize networking provider and create RemoteResourceOperatorSupplier
+                return initializeNetworkingProvider(config, vertx, client, remoteClientSupplier, centralPfa, remotePfas)
+                    .map(remoteResourceOperatorSupplier -> 
+                        new InitializationResult(remotePfas, remoteResourceOperatorSupplier, true, true));
             });
     }
 

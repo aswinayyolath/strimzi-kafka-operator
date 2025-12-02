@@ -72,8 +72,6 @@ import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceAccountOp
 import io.strimzi.operator.cluster.operator.resource.kubernetes.ServiceOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StorageClassOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StrimziPodSetOperator;
-import io.strimzi.operator.cluster.stretch.StretchClusterConfig;
-import io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult;
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.BackOff;
@@ -86,7 +84,6 @@ import io.strimzi.operator.common.model.ClientsCa;
 import io.strimzi.operator.common.model.Labels;
 import io.strimzi.operator.common.model.NodeUtils;
 import io.strimzi.operator.common.model.StatusDiff;
-import io.strimzi.operator.common.model.StatusUtils;
 import io.strimzi.operator.common.operator.resource.ReconcileResult;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -194,9 +191,6 @@ public class KafkaReconciler {
     private final Map<String, List<String>> stretchSecretsToDelete = new HashMap<>();
     private final Map<String, String> gcConfigMapUids = new HashMap<>(); // Store GC ConfigMap UIDs by cluster ID
 
-    // Stretch cluster state
-    private io.strimzi.operator.cluster.stretch.StretchClusterValidator validator;
-
     /* test */ boolean isStretchMode;
     /* test */ String stretchCentralClusterId;
     /* test */ Set<String> remoteClusterIds;
@@ -303,7 +297,6 @@ public class KafkaReconciler {
             }
         }
 
-        this.validator = new io.strimzi.operator.cluster.stretch.StretchClusterValidator(vertx, centralClusterId, remoteClusterIds);
 
 
         // Store suppliers for use in stretch listener reconciler
@@ -346,47 +339,6 @@ public class KafkaReconciler {
         this.stretchCentralClusterId = centralClusterId;
     }
 
-        /**
-         * Handle validation errors by updating Kafka CR status with error details.
-         *
-         * @param reconciliation Reconciliation context
-         * @param kafka Kafka CR
-         * @param result Validation result containing error details
-         * @return Future with KafkaStatus containing error condition
-         */
-    private Future<Void> handleValidationError(
-            KafkaStatus status,
-            io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result) {
-
-        LOGGER.errorOp("{}: Stretch cluster validation failed: {}", 
-            reconciliation, result.getErrorMessage());
-
-        // Add Ready: False condition
-        io.strimzi.api.kafka.model.common.Condition readyCondition = 
-            new io.strimzi.api.kafka.model.common.ConditionBuilder()
-                .withType("Ready")
-                .withStatus("False")
-                .withReason(result.getErrorCode())
-                .withMessage(result.getErrorMessage())
-                .withLastTransitionTime(StatusUtils.iso8601Now())
-                .build();
-
-        // Add StretchCluster: False condition to indicate stretch cluster validation failed
-        io.strimzi.api.kafka.model.common.Condition stretchCondition = 
-            new io.strimzi.api.kafka.model.common.ConditionBuilder()
-                .withType("StretchCluster")
-                .withStatus("False")
-                .withReason("InvalidStretchConfiguration")
-                .withMessage("Stretch cluster validation failed: " + result.getErrorMessage())
-                .withLastTransitionTime(StatusUtils.iso8601Now())
-                .build();
-
-        status.setConditions(List.of(readyCondition, stretchCondition));
-        status.setObservedGeneration(kafkaCr.getMetadata().getGeneration());
-
-        return Future.succeededFuture();
-    }
-
     /**
      * Helper method to select the appropriate PodOperator for a cluster.
      *
@@ -401,10 +353,10 @@ public class KafkaReconciler {
     }
 
     /**
-     * Helper method to select the appropriate PodOperator for a cluster.
+     * Helper method to select the appropriate ClusterRoleBindingOperator for a cluster.
      *
      * @param clusterId The cluster ID
-     * @return PodOperator for the cluster
+     * @return ClusterRoleBindingOperator for the cluster
      */
     private ClusterRoleBindingOperator selectClusterRoleBindingOperator(String clusterId) {
         if (clusterId.equals(stretchCentralClusterId)) {
@@ -980,145 +932,6 @@ public class KafkaReconciler {
      * @return              Future which completes when the reconciliation completes
      */
     public Future<Void> reconcileStretchedKafka(KafkaStatus kafkaStatus, Clock clock)    {
-        // Validate Kafka configuration
-        ValidationResult configResult =
-            validator.validateKafkaConfiguration(kafkaCr, kafkaNodePoolCrs, true);
-
-        if (!configResult.isValid()) {
-            return handleValidationError(kafkaStatus, configResult);
-        }
-
-        // Network latency validation (only on initial deployment)
-        if (isInitialDeployment(kafkaStatus)) {
-            LOGGER.infoCr(reconciliation,
-                "Initial deployment detected for stretch cluster '{}'. Performing network latency validation.",
-                kafkaCr.getMetadata().getName());
-
-            return validator.validateNetworkLatency(
-                    reconciliation,
-                    networkingProvider,
-                    remoteSupplier,
-                    kafkaCr.getMetadata().getNamespace(),
-                    kafkaCr.getMetadata().getName(),
-                    StretchClusterConfig.DEFAULT_MAX_LATENCY_MS,
-                    StretchClusterConfig.DEFAULT_WARNING_LATENCY_MS
-                )
-                .compose(latencyResult -> {
-                    if (!latencyResult.isValid()) {
-                        return handleLatencyValidationError(kafkaStatus, latencyResult);
-                    } else {
-                        return handleLatencyValidationSuccess(kafkaStatus, clock);
-                    }
-                })
-                .recover(error -> {
-                    LOGGER.errorCr(reconciliation,
-                        "Network latency validation encountered an error: {}",
-                        error.getMessage());
-
-                    ValidationResult errorResult =
-                        ValidationResult.error(
-                            "LatencyValidationFailed",
-                            "Network latency validation failed to complete: " + error.getMessage()
-                        );
-
-                    return handleLatencyValidationError(kafkaStatus, errorResult);
-                });
-        }
-
-        // Skip latency validation for existing clusters
-        LOGGER.debugCr(reconciliation,
-            "Skipping network latency validation for existing stretch cluster '{}'",
-            kafkaCr.getMetadata().getName());
-
-        return continueReconciliation(kafkaStatus, clock);
-    }
-
-    /**
-     * Checks if this is the initial deployment of a Kafka cluster.
-     *
-     * @param status Current Kafka status
-     * @return true if this is initial deployment
-     */
-    private boolean isInitialDeployment(KafkaStatus status) {
-        if (status == null) {
-            return true;
-        }
-
-        if (status.getConditions() == null || status.getConditions().isEmpty()) {
-            return true;
-        }
-
-        return status.getConditions().stream()
-            .noneMatch(c -> "Ready".equals(c.getType()));
-    }
-
-    /**
-     * Handles network latency validation failures.
-     *
-     * @param kafkaStatus Current Kafka status
-     * @param latencyResult Validation result containing error details
-     * @return Future that fails with InvalidResourceException
-     */
-    private Future<Void> handleLatencyValidationError(
-            KafkaStatus kafkaStatus,
-            ValidationResult latencyResult) {
-
-        LOGGER.errorCr(reconciliation, "Network latency validation failed for Kafka cluster '{}': {}",
-                      kafkaCr.getMetadata().getName(), latencyResult.getErrorMessage());
-
-        kafkaStatus.addCondition(new Condition() {{
-                setType("NetworkLatencyValidation");
-                setStatus("False");
-                setReason(latencyResult.getErrorCode());
-                setMessage(latencyResult.getErrorMessage());
-            }});
-
-        kafkaStatus.addCondition(new Condition() {{
-                setType("Ready");
-                setStatus("False");
-                setReason("NetworkLatencyValidationFailed");
-                setMessage("Stretch cluster deployment blocked due to network latency validation failure. " +
-                          "See NetworkLatencyValidation condition for details.");
-            }});
-
-        return updateKafkaStatus(kafkaStatus)
-            .compose(v -> Future.failedFuture(
-                new io.strimzi.operator.common.model.InvalidResourceException(latencyResult.getErrorMessage())
-            ));
-    }
-
-    /**
-     * Handles successful network latency validation.
-     *
-     * @param kafkaStatus Current Kafka status
-     * @param clock Clock for timestamps
-     * @return Future continuing with normal reconciliation
-     */
-    private Future<Void> handleLatencyValidationSuccess(
-            KafkaStatus kafkaStatus,
-            Clock clock) {
-
-        LOGGER.infoCr(reconciliation, "Network latency validation passed for Kafka cluster '{}'",
-                     kafkaCr.getMetadata().getName());
-
-        kafkaStatus.addCondition(new Condition() {{
-                setType("NetworkLatencyValidation");
-                setStatus("True");
-                setReason("NetworkLatencyAcceptable");
-                setMessage("All clusters have acceptable network latency for stretch cluster deployment.");
-            }});
-
-        return continueReconciliation(kafkaStatus, clock);
-    }
-
-    /**
-     * Continues with normal stretch cluster reconciliation.
-     *
-     * @param kafkaStatus Kafka status
-     * @param clock Clock for timestamps
-     * @return Future with reconciliation result
-     */
-    private Future<Void> continueReconciliation(KafkaStatus kafkaStatus, Clock clock) {
         return modelWarnings(kafkaStatus)
             .compose(i -> initClientAuthenticationCertificates())
             .compose(i -> stretchGarbageCollectorConfigMap()) // Create garbage collector ConfigMap in remote clusters FIRST
@@ -1147,13 +960,7 @@ public class KafkaReconciler {
             .compose(i -> stretchClusterStatus(kafkaStatus)) // Update stretch cluster status
             .compose(i -> defaultKafkaQuotas())
             .compose(i -> nodeUnregistration())
-            .compose(i -> metadataVersion(kafkaStatus))
-            .compose(i -> stretchDeletePersistentClaims())
-            .compose(i -> sharedKafkaConfigurationCleanup())
-            .compose(i -> stretchDeleteOldCertificateSecrets())
-            // This has to run after all possible rolling updates which might move the pods to different nodes
-            .compose(i -> nodePortExternalListenerStatus())
-            .compose(i -> stretchListenerStatus()) // Populate listener statuses for stretch clusters
+            .compose(i -> deletePersistentClaims())
             .compose(i -> updateKafkaStatus(kafkaStatus));
     }
 
