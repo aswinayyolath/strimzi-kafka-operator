@@ -157,7 +157,7 @@ public class StretchNetworkingProviderIntegrationTest {
         context.verify(() -> {
             StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
                 config, providerConfig, centralSupplier, remoteSupplier
-            );
+            ).result();
             
             assertThat("Provider should be loaded", provider, is(notNullValue()));
             assertThat("Provider should be TestNetworkingProvider", 
@@ -189,7 +189,7 @@ public class StretchNetworkingProviderIntegrationTest {
 
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
 
         context.verify(() -> {
@@ -211,7 +211,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
         String podName = TEST_CLUSTER_NAME + "-kafka-0";
@@ -251,7 +251,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
         String serviceName = TEST_CLUSTER_NAME + "-kafka-0-svc";
@@ -280,7 +280,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         String serviceName = TEST_CLUSTER_NAME + "-kafka-bootstrap";
         
@@ -303,7 +303,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         String podName = TEST_CLUSTER_NAME + "-kafka-0";
         String serviceName = TEST_CLUSTER_NAME + "-kafka-0-svc";
@@ -329,7 +329,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
         String podName = TEST_CLUSTER_NAME + "-kafka-0";
@@ -362,7 +362,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
         List<StretchNetworkingProvider.ControllerPodInfo> controllerPods = List.of(
@@ -397,7 +397,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
         String podName = TEST_CLUSTER_NAME + "-kafka-0";
@@ -421,7 +421,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         StretchNetworkingProvider provider = StretchNetworkingProviderFactory.create(
             config, new HashMap<>(), centralSupplier, remoteSupplier
-        );
+        ).result();
         
         Reconciliation reconciliation = new Reconciliation("test", "Kafka", TEST_NAMESPACE, TEST_CLUSTER_NAME);
 
