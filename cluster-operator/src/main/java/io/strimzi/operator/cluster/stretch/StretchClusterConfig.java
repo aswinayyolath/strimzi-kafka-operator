@@ -54,38 +54,12 @@ public class StretchClusterConfig {
      */
     public static final String STRIMZI_STRETCH_PLUGIN_CLASS_PATH = "STRIMZI_STRETCH_PLUGIN_CLASS_PATH";
 
-    /**
-     * Environment variable for maximum acceptable network latency in milliseconds.
-     * Deployments exceeding this latency will be blocked.
-     * Default: 10ms
-     */
-    public static final String STRIMZI_STRETCH_MAX_LATENCY_MS = "STRIMZI_STRETCH_MAX_LATENCY_MS";
-
-    /**
-     * Environment variable for network latency warning threshold in milliseconds.
-     * Deployments exceeding this will log warnings but proceed.
-     * Default: 5ms
-     */
-    public static final String STRIMZI_STRETCH_WARNING_LATENCY_MS = "STRIMZI_STRETCH_WARNING_LATENCY_MS";
-
-    /**
-     * Default maximum latency in milliseconds (10ms for same-datacenter).
-     */
-    public static final int DEFAULT_MAX_LATENCY_MS = 10;
-
-    /**
-     * Default warning latency in milliseconds (5ms optimal threshold).
-     */
-    public static final int DEFAULT_WARNING_LATENCY_MS = 5;
-
     private final Map<String, ClusterInfo> remoteClusters;
     private final String centralClusterId;
     private final String networkProvider;
     private final String networkConfigMap;
     private final String pluginClassName;
     private final String pluginClassPath;
-    private final int maxLatencyMs;
-    private final int warningLatencyMs;
 
     /**
      * Constructor.
@@ -96,8 +70,6 @@ public class StretchClusterConfig {
      * @param networkConfigMap  Stretch network config map name
      * @param pluginClassName   Custom plugin class name
      * @param pluginClassPath   Custom plugin class path
-     * @param maxLatencyMs      Maximum acceptable latency in ms
-     * @param warningLatencyMs  Warning threshold for latency in ms
      */
     public StretchClusterConfig(
             Map<String, ClusterInfo> remoteClusters,
@@ -105,17 +77,13 @@ public class StretchClusterConfig {
             String networkProvider,
             String networkConfigMap,
             String pluginClassName,
-            String pluginClassPath,
-            int maxLatencyMs,
-            int warningLatencyMs) {
+            String pluginClassPath) {
         this.remoteClusters = remoteClusters != null ? remoteClusters : new HashMap<>();
         this.centralClusterId = centralClusterId;
         this.networkProvider = networkProvider;
         this.networkConfigMap = networkConfigMap;
         this.pluginClassName = pluginClassName;
         this.pluginClassPath = pluginClassPath;
-        this.maxLatencyMs = maxLatencyMs;
-        this.warningLatencyMs = warningLatencyMs;
     }
 
     /**
@@ -170,26 +138,6 @@ public class StretchClusterConfig {
      */
     public String getPluginClassPath() {
         return pluginClassPath;
-    }
-
-    /**
-     * Gets the maximum acceptable network latency in milliseconds.
-     * Deployments exceeding this latency will be blocked.
-     *
-     * @return Maximum latency threshold in ms
-     */
-    public int getMaxLatencyMs() {
-        return maxLatencyMs;
-    }
-
-    /**
-     * Gets the network latency warning threshold in milliseconds.
-     * Deployments exceeding this will log warnings but proceed.
-     *
-     * @return Warning latency threshold in ms
-     */
-    public int getWarningLatencyMs() {
-        return warningLatencyMs;
     }
 
     /**
@@ -418,44 +366,13 @@ public class StretchClusterConfig {
 
             Map<String, ClusterInfo> remoteClusters = parseRemoteClusterConfigs(remoteKubeConfig);
 
-            // Parse latency thresholds with defaults
-            int maxLatencyMs = DEFAULT_MAX_LATENCY_MS;
-            int warningLatencyMs = DEFAULT_WARNING_LATENCY_MS;
-
-            try {
-                if (map.containsKey(STRIMZI_STRETCH_MAX_LATENCY_MS)) {
-                    maxLatencyMs = Integer.parseInt(map.get(STRIMZI_STRETCH_MAX_LATENCY_MS));
-                    if (maxLatencyMs <= 0) {
-                        LOGGER.warn("Invalid STRIMZI_STRETCH_MAX_LATENCY_MS value: {}. Using default: {}ms",
-                                   map.get(STRIMZI_STRETCH_MAX_LATENCY_MS), DEFAULT_MAX_LATENCY_MS);
-                        maxLatencyMs = DEFAULT_MAX_LATENCY_MS;
-                    }
-                }
-
-                if (map.containsKey(STRIMZI_STRETCH_WARNING_LATENCY_MS)) {
-                    warningLatencyMs = Integer.parseInt(map.get(STRIMZI_STRETCH_WARNING_LATENCY_MS));
-                    if (warningLatencyMs <= 0) {
-                        LOGGER.warn("Invalid STRIMZI_STRETCH_WARNING_LATENCY_MS value: {}. Using default: {}ms",
-                                   map.get(STRIMZI_STRETCH_WARNING_LATENCY_MS), DEFAULT_WARNING_LATENCY_MS);
-                        warningLatencyMs = DEFAULT_WARNING_LATENCY_MS;
-                    }
-                }
-            } catch (NumberFormatException e) {
-                LOGGER.warn("Failed to parse latency threshold configuration. Using defaults: max={}ms, warning={}ms",
-                           DEFAULT_MAX_LATENCY_MS, DEFAULT_WARNING_LATENCY_MS);
-                maxLatencyMs = DEFAULT_MAX_LATENCY_MS;
-                warningLatencyMs = DEFAULT_WARNING_LATENCY_MS;
-            }
-
             return new StretchClusterConfig(
                 remoteClusters,
                 centralClusterId,
                 map.get(STRIMZI_STRETCH_NETWORK_PROVIDER),
                 map.get(STRIMZI_STRETCH_NETWORK_CONFIG_MAP),
                 map.get(STRIMZI_STRETCH_PLUGIN_CLASS_NAME),
-                map.get(STRIMZI_STRETCH_PLUGIN_CLASS_PATH),
-                maxLatencyMs,
-                warningLatencyMs
+                map.get(STRIMZI_STRETCH_PLUGIN_CLASS_PATH)
             );
         } catch (InvalidConfigurationException ex) {
             LOGGER.warn("Stretch cluster configuration incomplete: " + ex.getMessage());

@@ -560,9 +560,29 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                 );
             }
 
-            // Stretch cluster configuration validation removed
-            // Validation will be done during reconciliation if needed
-            return Future.succeededFuture(this);
+            // Validate Kafka CR and NodePool configuration
+            return nodePoolOperator.listAsync(namespace, Labels.forStrimziCluster(name))
+                .compose(nodePools -> {
+                    // Create validator
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator validator =
+                        new io.strimzi.operator.cluster.stretch.StretchClusterValidator(
+                            vertx,
+                            config.getCentralClusterId(),
+                            config.getRemoteClusters().keySet()
+                        );
+
+                    // Validate configuration
+                    io.strimzi.operator.cluster.stretch.StretchClusterValidator.ValidationResult result =
+                        validator.validateKafkaConfiguration(kafkaAssembly, nodePools, true);
+
+                    if (!result.isValid()) {
+                        return Future.failedFuture(
+                            new InvalidConfigurationException(result.getErrorMessage())
+                        );
+                    }
+
+                    return Future.succeededFuture(this);
+                });
         }
 
         /**
