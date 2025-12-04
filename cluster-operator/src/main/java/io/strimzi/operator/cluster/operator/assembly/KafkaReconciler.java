@@ -620,7 +620,7 @@ public class KafkaReconciler {
      * @param metricsAndLogging Metrics and logging configuration
      * @return                  Future which completes when ConfigMaps are reconciled across all clusters
      */
-    @SuppressWarnings("checkstyle:MethodLength") // Complex async orchestration logic for stretch cluster configuration
+    @SuppressWarnings({"checkstyle:MethodLength",  "checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"}) // Complex async orchestration logic for stretch cluster configuration
     protected Future<Void> stretchPerBrokerKafkaConfiguration(MetricsAndLogging metricsAndLogging) {
         List<Future<Void>> futures = new ArrayList<>();
 
@@ -639,13 +639,14 @@ public class KafkaReconciler {
                 listeners.put("REPLICATION-9091", "replication");
                 // Add user configured listeners
                 for (GenericKafkaListener listener : kafka.getListeners()) {
-                    listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH) + "-" + listener.getPort(), listener.getName());
+                    if (listener.getType().equals("internal"))
+                        listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH), listener.getName());
                 }
 
-                String clusterId = getClusterIdForNode(node);
+                LOGGER.infoOp("Node {}, clusterid {}", node, node.clusterId());
                 listenerFutures.add(
                     networkingProvider.generateAdvertisedListeners(
-                        reconciliation, namespace, node.podName(), clusterId, listeners
+                        reconciliation, namespace, node.podName(), node.clusterId(), listeners
                     ).map(s -> Map.entry(node.nodeId(), s))
                 );
             }
@@ -664,7 +665,7 @@ public class KafkaReconciler {
             List<io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider.ControllerPodInfo> controllerInfos = new ArrayList<>();
             for (NodeRef node : kafka.controllerNodes()) {
                 controllerInfos.add(new io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider.ControllerPodInfo(
-                    node.nodeId(), node.podName(), getClusterIdForNode(node)
+                    node.nodeId(), node.podName(), node.clusterId()
                 ));
             }
             quorumVotersFuture = networkingProvider.generateQuorumVoters(
@@ -675,6 +676,20 @@ public class KafkaReconciler {
         return Future.join(advertisedListenersFuture, quorumVotersFuture)
             .compose(res -> {
                 Map<Integer, String> customAdvertisedListeners = res.resultAt(0);
+
+                for (NodeRef node : kafka.brokerNodes()) {
+                    for (GenericKafkaListener listener : kafka.getListeners()) {
+                        if (!listener.getType().equals("internal"))
+                            customAdvertisedListeners.put(
+                                node.nodeId(), 
+                                listenerReconciliationResults
+                                    .advertisedHostnames
+                                    .get(node.nodeId())
+                                    .get(listener.getName())
+                            );
+                    }
+                }
+
                 String customQuorumVoters = res.resultAt(1);
 
                 for (String targetClusterId : clusterIds) {
@@ -845,37 +860,6 @@ public class KafkaReconciler {
         }
 
         return Future.join(futures).map(ignored -> clusteredPodSetDiff);
-    }
-
-    /**
-     * Helper method to get the cluster ID for a given node.
-     *
-     * @param node The node reference
-     * @return     The cluster ID for this node
-     */
-    private String getClusterIdForNode(NodeRef node) {
-        // Find the pool for this node
-        KafkaPool pool = kafka.nodePoolForNodeId(node.nodeId());
-        if (pool == null) {
-            return stretchCentralClusterId; // Default to central cluster
-        }
-
-        // Get the cluster ID from the pool's annotation
-        // The pool's component name is in format "clusterName-poolName", so extract just the pool name
-        String poolName = pool.getComponentName().substring(kafka.getComponentName().length() + 1);
-        for (KafkaNodePool knp : kafkaNodePoolCrs) {
-            if (knp.getMetadata().getName().equals(poolName)) {
-                if (knp.getMetadata().getAnnotations() != null) {
-                    String clusterId = knp.getMetadata().getAnnotations().get("strimzi.io/stretch-cluster-alias");
-                    if (clusterId != null && !clusterId.isEmpty()) {
-                        return clusterId;
-                    }
-                }
-                break;
-            }
-        }
-
-        return stretchCentralClusterId; // Default to central cluster
     }
 
     /**

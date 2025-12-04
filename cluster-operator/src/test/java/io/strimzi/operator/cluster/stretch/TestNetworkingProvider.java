@@ -142,7 +142,8 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
             String namespace,
             String podName,
             String clusterId,
-            Map<String, String> listeners) {
+            Map<String, String> listeners
+    ) {
         
         if (!initialized) {
             return Future.failedFuture(new IllegalStateException("Provider not initialized"));
