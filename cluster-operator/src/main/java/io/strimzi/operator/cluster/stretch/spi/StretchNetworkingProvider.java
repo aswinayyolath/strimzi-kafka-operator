@@ -143,7 +143,6 @@ public interface StretchNetworkingProvider {
      * <p><b>Thread Safety:</b> This method may be called concurrently for different pods.</p>
      *
      * @param reconciliation Reconciliation context for logging and correlation. Never null.
-     * @param namespace Kubernetes namespace where the pod is located. Never null or empty.
      * @param podName Name of the Kafka pod (e.g., "my-cluster-kafka-0"). Never null or empty.
      * @param clusterId Target cluster ID where the pod is located (e.g., "cluster-1"). Never null or empty.
      * @param ports Map of port names to port numbers (e.g., {"replication": 9091, "plain": 9092}).
@@ -153,7 +152,6 @@ public interface StretchNetworkingProvider {
      */
     Future<List<HasMetadata>> createNetworkingResources(
         Reconciliation reconciliation,
-        String namespace,
         String podName,
         String clusterId,
         Map<String, Integer> ports
@@ -186,7 +184,6 @@ public interface StretchNetworkingProvider {
      *
      * <p><b>Thread Safety:</b> This method may be called concurrently for different pods.</p>
      *
-     * @param reconciliation Reconciliation context for logging. Never null.
      * @param namespace Kubernetes namespace where the pod is located. Never null or empty.
      * @param serviceName Service name associated with the pod. Never null or empty.
      * @param clusterId Target cluster ID where the pod is located. Never null or empty.
@@ -195,7 +192,6 @@ public interface StretchNetworkingProvider {
      *         if endpoint discovery fails (e.g., service not ready, external IP not assigned).
      */
     Future<String> discoverPodEndpoint(
-        Reconciliation reconciliation,
         String namespace,
         String serviceName,
         String clusterId,
@@ -219,7 +215,7 @@ public interface StretchNetworkingProvider {
      * @param clusterId Target cluster ID. Never null or empty.
      * @return DNS name that can be used from other clusters. Never null or empty.
      */
-    String generateServiceDnsName(String namespace,
+    Future<String> generateServiceDnsName(String namespace,
                                    String serviceName,
                                    String clusterId);
 
@@ -241,7 +237,7 @@ public interface StretchNetworkingProvider {
      * @param clusterId Target cluster ID. Never null or empty.
      * @return DNS name that can be used from other clusters. Never null or empty.
      */
-    String generatePodDnsName(String namespace,
+    Future<String> generatePodDnsName(String namespace,
                                String serviceName,
                                String podName,
                                String clusterId);
@@ -262,7 +258,6 @@ public interface StretchNetworkingProvider {
      * <p><b>Format:</b> {@code "LISTENER_NAME-PORT://host:port,..."}</p>
      *
      * @param reconciliation Reconciliation context for logging. Never null.
-     * @param namespace Kubernetes namespace. Never null or empty.
      * @param podName Broker pod name. Never null or empty.
      * @param clusterId Cluster ID where the pod is located. Never null or empty.
      * @param listeners Map of listener names to port names (e.g., {"REPLICATION-9091": "replication"}).
@@ -272,7 +267,6 @@ public interface StretchNetworkingProvider {
      */
     Future<String> generateAdvertisedListeners(
         Reconciliation reconciliation,
-        String namespace,
         String podName,
         String clusterId,
         Map<String, String> listeners
@@ -294,7 +288,6 @@ public interface StretchNetworkingProvider {
      * <p><b>Format:</b> {@code "nodeId@host:port,..."}</p>
      *
      * @param reconciliation Reconciliation context for logging. Never null.
-     * @param namespace Kubernetes namespace. Never null or empty.
      * @param controllerPods List of all controller pod configurations. Never null, but may be empty.
      * @param replicationPortName Port name used for controller replication (e.g., "replication").
      *                            Never null or empty.
@@ -303,7 +296,6 @@ public interface StretchNetworkingProvider {
      */
     Future<String> generateQuorumVoters(
         Reconciliation reconciliation,
-        String namespace,
         List<ControllerPodInfo> controllerPods,
         String replicationPortName
     );
@@ -328,7 +320,6 @@ public interface StretchNetworkingProvider {
      * <p><b>Thread Safety:</b> This method may be called concurrently for different pods.</p>
      *
      * @param reconciliation Reconciliation context for logging. Never null.
-     * @param namespace Kubernetes namespace. Never null or empty.
      * @param podName Pod name. Never null or empty.
      * @param clusterId Cluster ID. Never null or empty.
      * @return Future that completes when resources are deleted. Return a failed Future
@@ -337,7 +328,6 @@ public interface StretchNetworkingProvider {
      */
     Future<Void> deleteNetworkingResources(
         Reconciliation reconciliation,
-        String namespace,
         String podName,
         String clusterId
     );

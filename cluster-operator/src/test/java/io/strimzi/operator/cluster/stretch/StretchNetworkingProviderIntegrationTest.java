@@ -220,7 +220,7 @@ public class StretchNetworkingProviderIntegrationTest {
         ports.put("controller", 9093);
         
 
-        provider.createNetworkingResources(reconciliation, TEST_NAMESPACE, podName, CENTRAL_CLUSTER_ID, ports)
+        provider.createNetworkingResources(reconciliation, podName, CENTRAL_CLUSTER_ID, ports)
             .onComplete(context.succeeding(resources -> context.verify(() -> {
         
                 assertThat("Should create resources", resources, is(notNullValue()));
@@ -257,7 +257,7 @@ public class StretchNetworkingProviderIntegrationTest {
         String serviceName = TEST_CLUSTER_NAME + "-kafka-0-svc";
         
 
-        provider.discoverPodEndpoint(reconciliation, TEST_NAMESPACE, serviceName, CENTRAL_CLUSTER_ID, "replication")
+        provider.discoverPodEndpoint(TEST_NAMESPACE, serviceName, CENTRAL_CLUSTER_ID, "replication")
             .onComplete(context.succeeding(endpoint -> context.verify(() -> {
         
                 assertThat("Endpoint should be returned", endpoint, is(notNullValue()));
@@ -285,7 +285,7 @@ public class StretchNetworkingProviderIntegrationTest {
         String serviceName = TEST_CLUSTER_NAME + "-kafka-bootstrap";
         
 
-        String dnsName = provider.generateServiceDnsName(TEST_NAMESPACE, serviceName, CENTRAL_CLUSTER_ID);
+        String dnsName = provider.generateServiceDnsName(TEST_NAMESPACE, serviceName, CENTRAL_CLUSTER_ID).result();
         
 
         assertThat("DNS name should be generated", dnsName, is(notNullValue()));
@@ -309,7 +309,7 @@ public class StretchNetworkingProviderIntegrationTest {
         String serviceName = TEST_CLUSTER_NAME + "-kafka-0-svc";
         
 
-        String dnsName = provider.generatePodDnsName(TEST_NAMESPACE, serviceName, podName, CENTRAL_CLUSTER_ID);
+        String dnsName = provider.generatePodDnsName(TEST_NAMESPACE, serviceName, podName, CENTRAL_CLUSTER_ID).result();
         
 
         assertThat("DNS name should be generated", dnsName, is(notNullValue()));
@@ -338,7 +338,7 @@ public class StretchNetworkingProviderIntegrationTest {
         listeners.put("PLAIN-9092", "plain");
         
 
-        provider.generateAdvertisedListeners(reconciliation, TEST_NAMESPACE, podName, CENTRAL_CLUSTER_ID, listeners)
+        provider.generateAdvertisedListeners(reconciliation, podName, CENTRAL_CLUSTER_ID, listeners)
             .onComplete(context.succeeding(advertisedListeners -> context.verify(() -> {
         
                 assertThat("Advertised listeners should be generated", advertisedListeners, is(notNullValue()));
@@ -372,7 +372,7 @@ public class StretchNetworkingProviderIntegrationTest {
         );
         
 
-        provider.generateQuorumVoters(reconciliation, TEST_NAMESPACE, controllerPods, "replication")
+        provider.generateQuorumVoters(reconciliation, controllerPods, "replication")
             .onComplete(context.succeeding(quorumVoters -> context.verify(() -> {
         
                 assertThat("Quorum voters should be generated", quorumVoters, is(notNullValue()));
@@ -403,7 +403,7 @@ public class StretchNetworkingProviderIntegrationTest {
         String podName = TEST_CLUSTER_NAME + "-kafka-0";
         
 
-        provider.deleteNetworkingResources(reconciliation, TEST_NAMESPACE, podName, CENTRAL_CLUSTER_ID)
+        provider.deleteNetworkingResources(reconciliation, podName, CENTRAL_CLUSTER_ID)
             .onComplete(context.succeeding(v -> context.verify(() -> {
 
                 context.completeNow();
@@ -427,11 +427,11 @@ public class StretchNetworkingProviderIntegrationTest {
 
         Map<String, Integer> ports = Map.of("replication", 9091);
         
-        provider.createNetworkingResources(reconciliation, TEST_NAMESPACE, 
+        provider.createNetworkingResources(reconciliation, 
                 TEST_CLUSTER_NAME + "-kafka-0", CENTRAL_CLUSTER_ID, ports)
-            .compose(r1 -> provider.createNetworkingResources(reconciliation, TEST_NAMESPACE, 
+            .compose(r1 -> provider.createNetworkingResources(reconciliation, 
                 TEST_CLUSTER_NAME + "-kafka-1", REMOTE_CLUSTER_A_ID, ports))
-            .compose(r2 -> provider.createNetworkingResources(reconciliation, TEST_NAMESPACE, 
+            .compose(r2 -> provider.createNetworkingResources(reconciliation, 
                 TEST_CLUSTER_NAME + "-kafka-2", REMOTE_CLUSTER_B_ID, ports))
             .onComplete(context.succeeding(resources -> context.verify(() -> {
                 assertThat("Resources should be created", resources, is(notNullValue()));

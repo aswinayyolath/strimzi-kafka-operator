@@ -257,32 +257,11 @@ public class KafkaBrokerConfigurationBuilder {
                 .filter(NodeRef::controller)
                 .sorted(Comparator.comparingInt(NodeRef::nodeId))
                 .map(node -> {
-                    String podDns;
-
-                    if (isStretchMode && stretchNetworkingProvider != null) {
-                        // Use the stretch networking provider for DNS generation
-                        podDns = stretchNetworkingProvider.generatePodDnsName(
-                            namespace,
-                            KafkaResources.brokersServiceName(clusterName),
-                            node.podName(),
-                            node.clusterId()
-                        );
-                    } else if (isStretchMode) {
-                        // Fallback to the old MCS-based DNS generation
-                        podDns = DnsNameGenerator.podDnsNameWithClusterId(
-                            node.clusterId(),
-                            namespace,
-                            KafkaResources.brokersServiceName(clusterName),
-                            node.podName()
-                        );
-                    } else {
-                        // Standard DNS generation for non-stretch mode
-                        podDns = DnsNameGenerator.podDnsName(
-                            namespace,
-                            KafkaResources.brokersServiceName(clusterName),
-                            node.podName()
-                        );
-                    }
+                    String podDns = DnsNameGenerator.podDnsName(
+                        namespace,
+                        KafkaResources.brokersServiceName(clusterName),
+                        node.podName()
+                    );
 
                     return String.format(
                         "%s@%s:9090",
@@ -293,6 +272,8 @@ public class KafkaBrokerConfigurationBuilder {
                 .toList();
 
         // Use custom quorum voters if provided by stretch networking provider, otherwise use generated list
+        System.out.println("controller.quorum.voters=" + customControllerQuorumVoters);
+
         if (customControllerQuorumVoters != null) {
             writer.println("controller.quorum.voters=" + customControllerQuorumVoters);
         } else {
@@ -343,32 +324,12 @@ public class KafkaBrokerConfigurationBuilder {
         // Listeners for nodes with controller role
         ////////////////////
         
-        String podDNS;
-
-        if (isStretchMode && stretchNetworkingProvider != null) {
-            // Use the stretch networking provider for DNS generation
-            podDNS = stretchNetworkingProvider.generatePodDnsName(
-                namespace,
-                KafkaResources.brokersServiceName(clusterName),
-                node.podName(),
-                node.clusterId()
-            );
-        } else if (isStretchMode) {
-            // Fallback to the old MCS-based DNS generation
-            podDNS = DnsNameGenerator.podDnsNameWithClusterDomainAndClusterId(
-                node.clusterId(),
+       
+        String podDNS = DnsNameGenerator.podDnsNameWithoutClusterDomain(
                 namespace,
                 KafkaResources.brokersServiceName(clusterName),
                 node.podName()
             );
-        } else {
-            // Standard DNS generation for non-stretch mode
-            podDNS = DnsNameGenerator.podDnsNameWithoutClusterDomain(
-                namespace,
-                KafkaResources.brokersServiceName(clusterName),
-                node.podName()
-            );
-        }
 
         if (node.controller()) {
             listeners.add(CONTROL_PLANE_LISTENER_NAME + "://0.0.0.0:9090");

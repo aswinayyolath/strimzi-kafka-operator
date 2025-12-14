@@ -450,7 +450,6 @@ public class StretchNetworkingProviderPluginLoadingTest {
         @Override
         public Future<java.util.List<io.fabric8.kubernetes.api.model.HasMetadata>> createNetworkingResources(
                 io.strimzi.operator.common.Reconciliation reconciliation,
-                String namespace,
                 String podName,
                 String clusterId,
                 Map<String, Integer> ports) {
@@ -459,7 +458,6 @@ public class StretchNetworkingProviderPluginLoadingTest {
         
         @Override
         public Future<String> discoverPodEndpoint(
-                io.strimzi.operator.common.Reconciliation reconciliation,
                 String namespace,
                 String serviceName,
                 String clusterId,
@@ -468,19 +466,18 @@ public class StretchNetworkingProviderPluginLoadingTest {
         }
         
         @Override
-        public String generateServiceDnsName(String namespace, String serviceName, String clusterId) {
+        public Future<String> generateServiceDnsName(String namespace, String serviceName, String clusterId) {
             throw new UnsupportedOperationException("FailingInitProvider is only for testing init() failures");
         }
         
         @Override
-        public String generatePodDnsName(String namespace, String serviceName, String podName, String clusterId) {
+        public Future<String> generatePodDnsName(String namespace, String serviceName, String podName, String clusterId) {
             throw new UnsupportedOperationException("FailingInitProvider is only for testing init() failures");
         }
         
         @Override
         public Future<String> generateAdvertisedListeners(
                 io.strimzi.operator.common.Reconciliation reconciliation,
-                String namespace,
                 String podName,
                 String clusterId,
                 Map<String, String> listeners) {
@@ -490,7 +487,6 @@ public class StretchNetworkingProviderPluginLoadingTest {
         @Override
         public Future<String> generateQuorumVoters(
                 io.strimzi.operator.common.Reconciliation reconciliation,
-                String namespace,
                 java.util.List<StretchNetworkingProvider.ControllerPodInfo> controllerPods,
                 String replicationPortName) {
             throw new UnsupportedOperationException("FailingInitProvider is only for testing init() failures");
@@ -499,7 +495,6 @@ public class StretchNetworkingProviderPluginLoadingTest {
         @Override
         public Future<Void> deleteNetworkingResources(
                 io.strimzi.operator.common.Reconciliation reconciliation,
-                String namespace,
                 String podName,
                 String clusterId) {
             throw new UnsupportedOperationException("FailingInitProvider is only for testing init() failures");

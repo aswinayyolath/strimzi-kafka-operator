@@ -494,7 +494,8 @@ public class KafkaReconciler {
                                     maintenanceWindows, 
                                     clock.instant()
                                 ), 
-                                targetClusterId
+                                targetClusterId,
+                                networkingProvider
                             )
                             .stream()
                             .map(secret -> {
@@ -569,23 +570,23 @@ public class KafkaReconciler {
         Map<String, Integer> ports = buildNetworkingPorts();
 
         // Create networking resources for each broker in each cluster
-        // Note: The plugin may deduplicate internally (e.g., MCS creates one ServiceExport per cluster)
-        for (String clusterId : clusterIds) {
-            for (NodeRef node : kafka.nodes()) {
-                if (!node.broker()) {
-                    continue; // Skip controller-only nodes
-                }
+        for (NodeRef node : kafka.nodes()) {
+            LOGGER.infoOp("Networking Resources = {}, {}, {}, {}, {}",
+                reconciliation,
+                namespace,
+                node.podName(),
+                node.clusterId(),
+                ports
+            );
 
-                futures.add(
-                    networkingProvider.createNetworkingResources(
-                        reconciliation,
-                        namespace,
-                        node.podName(),
-                        clusterId,
-                        ports
-                    ).mapEmpty()
-                );
-            }
+            futures.add(
+                networkingProvider.createNetworkingResources(
+                    reconciliation,
+                    node.podName(),
+                    node.clusterId(),
+                    ports
+                ).mapEmpty()
+            );
         }
 
         return Future.join(futures).mapEmpty();
@@ -633,22 +634,30 @@ public class KafkaReconciler {
             List<Future<Map.Entry<Integer, String>>> listenerFutures = new ArrayList<>();
             String namespace = reconciliation.namespace();
 
-            for (NodeRef node : kafka.brokerNodes()) {
+            for (NodeRef node : kafka.nodes()) {
                 Map<String, String> listeners = new HashMap<>();
-                // Add standard listeners
-                listeners.put("REPLICATION-9091", "replication");
-                // Add user configured listeners
-                for (GenericKafkaListener listener : kafka.getListeners()) {
-                    if (listener.getType().equals("internal"))
-                        listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH), listener.getName());
+
+                if (node.broker()) {
+                    // Add standard listeners
+                    listeners.put("REPLICATION-9091", "tcp-replication");
+                    // Add user configured listeners
+                    for (GenericKafkaListener listener : kafka.getListeners()) {
+                        if (listener.getType().equals("internal"))
+                            listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH), listener.getName());
+                    }
                 }
 
+                if (node.controller()) {
+                    listeners.put("CONTROLPLANE-9090", "tcp-ctrlplane");
+                }
+                
                 LOGGER.infoOp("Node {}, clusterid {}", node, node.clusterId());
                 listenerFutures.add(
                     networkingProvider.generateAdvertisedListeners(
-                        reconciliation, namespace, node.podName(), node.clusterId(), listeners
+                        reconciliation, node.podName(), node.clusterId(), listeners
                     ).map(s -> Map.entry(node.nodeId(), s))
                 );
+                
             }
 
             advertisedListenersFuture = Future.join(listenerFutures)
@@ -669,7 +678,7 @@ public class KafkaReconciler {
                 ));
             }
             quorumVotersFuture = networkingProvider.generateQuorumVoters(
-                reconciliation, namespace, controllerInfos, "replication"
+                reconciliation, controllerInfos, "tcp-ctrlplane"
             );
         }
 
@@ -677,18 +686,37 @@ public class KafkaReconciler {
             .compose(res -> {
                 Map<Integer, String> customAdvertisedListeners = res.resultAt(0);
 
+                LOGGER.infoOp("Custom advertised listners future result {}", customAdvertisedListeners);
+
                 for (NodeRef node : kafka.brokerNodes()) {
                     for (GenericKafkaListener listener : kafka.getListeners()) {
                         if (!listener.getType().equals("internal"))
                             customAdvertisedListeners.put(
                                 node.nodeId(), 
+                                customAdvertisedListeners.get(
+                                    node.nodeId()
+                                ) + ',' + ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH) + "://" +
                                 listenerReconciliationResults
                                     .advertisedHostnames
                                     .get(node.nodeId())
-                                    .get(listener.getName())
+                                    .get(ListenersUtils.envVarIdentifier(listener)) + ":" + 
+                                listenerReconciliationResults
+                                    .advertisedPorts
+                                    .get(node.nodeId())
+                                    .get(ListenersUtils.envVarIdentifier(listener))
+
+                                
                             );
+                        LOGGER.infoOp("Listener reconciliation results {}", 
+                            listenerReconciliationResults
+                                .advertisedHostnames
+                                .get(node.nodeId()).get(ListenersUtils.envVarIdentifier(listener))
+                        );
                     }
                 }
+
+                LOGGER.infoOp("Custom advertised listners after adding internal listeners {}", customAdvertisedListeners);
+
 
                 String customQuorumVoters = res.resultAt(1);
 
@@ -711,6 +739,9 @@ public class KafkaReconciler {
                         customQuorumVoters,
                         customAdvertisedListeners
                     );
+
+                    LOGGER.infoOp("CUSTOM QUORUM VOTERS: {}", customQuorumVoters);
+                    LOGGER.infoOp("CUSTOM ADVERTISED LISTENERS: {}", customAdvertisedListeners);
 
                     // Add GC ConfigMap as owner for remote cluster ConfigMaps
                     final List<ConfigMap> clusterConfigMaps;
@@ -1188,30 +1219,42 @@ public class KafkaReconciler {
 
         List<ListenerAddress> addresses = new ArrayList<>();
 
+        List<Future<String>> addressFutures = new ArrayList<Future<String>>();
+
         // Add address for each cluster in the stretch setup
         for (String clusterId : clusterIds) {
-            String bootstrapHost = networkingProvider != null 
-                    ? networkingProvider.generateServiceDnsName(
-                            reconciliation.namespace(), 
-                            bootstrapServiceName, 
-                            clusterId)
-                    : bootstrapServiceName + "." + reconciliation.namespace() + ".svc";
+            
+            if (networkingProvider != null) {
+                addressFutures.add(networkingProvider.generateServiceDnsName(
+                    reconciliation.namespace(), 
+                    bootstrapServiceName, 
+                    clusterId));
+            } else {
+                addressFutures.add(Future.succeededFuture(bootstrapServiceName + "." + reconciliation.namespace() + ".svc"));
+            }
 
-            addresses.add(new ListenerAddressBuilder()
-                    .withHost(bootstrapHost)
-                    .withPort(port)
-                    .build());
+           
         }
 
-        ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
-                .withName(listener.getName())
-                .withAddresses(addresses); // bootstrapServers is auto-generated from addresses
+        return Future.join(addressFutures)
+                .compose(f -> {
+                    for (int i = 0; i < addressFutures.size(); i++) {
+                        addresses.add(new ListenerAddressBuilder()
+                            .withHost(f.resultAt(i))
+                            .withPort(port)
+                            .build());
+                    }
 
-        if (listener.isTls() && clusterCa != null) {
-            statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
-        }
-
-        return Future.succeededFuture(statusBuilder.build());
+                    ListenerStatusBuilder statusBuilder = new ListenerStatusBuilder()
+                        .withName(listener.getName())
+                        .withAddresses(addresses); // bootstrapServers is auto-generated from addresses
+    
+                    if (listener.isTls() && clusterCa != null) {
+                        statusBuilder.withCertificates(clusterCa.currentCaCertBase64());
+                    }
+            
+                    return Future.succeededFuture(statusBuilder.build());
+                });
     }
 
     /**
@@ -1840,7 +1883,7 @@ public class KafkaReconciler {
                     for (NodeRef node : pool.scaledDownNodes()) {
                         final String finalClusterId = clusterId;
                         futures.add(networkingProvider.deleteNetworkingResources(
-                            reconciliation, reconciliation.namespace(), node.podName(), clusterId
+                            reconciliation, node.podName(), clusterId
                         ).recover(e -> {
                             LOGGER.warnCr(reconciliation, "Failed to delete networking resources for pod {} in cluster {}", node.podName(), finalClusterId, e);
                             return Future.succeededFuture();
