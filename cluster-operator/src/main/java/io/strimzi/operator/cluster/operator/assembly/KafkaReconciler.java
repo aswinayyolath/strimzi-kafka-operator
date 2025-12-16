@@ -26,6 +26,7 @@ import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatus;
 import io.strimzi.api.kafka.model.kafka.UsedNodePoolStatusBuilder;
 import io.strimzi.api.kafka.model.kafka.cruisecontrol.KafkaAutoRebalanceStatus;
 import io.strimzi.api.kafka.model.kafka.listener.GenericKafkaListener;
+import io.strimzi.api.kafka.model.kafka.listener.KafkaListenerType;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerAddress;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerAddressBuilder;
 import io.strimzi.api.kafka.model.kafka.listener.ListenerStatus;
@@ -639,11 +640,11 @@ public class KafkaReconciler {
 
                 if (node.broker()) {
                     // Add standard listeners
-                    listeners.put("REPLICATION-9091", "tcp-replication");
                     // Add user configured listeners
                     for (GenericKafkaListener listener : kafka.getListeners()) {
-                        if (listener.getType().equals("internal"))
-                            listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH), listener.getName());
+                        if (listener.getType() == KafkaListenerType.INTERNAL) {
+                            listeners.put(ListenersUtils.identifier(listener).toUpperCase(Locale.ENGLISH), "tcp-" + listener.getName());
+                        }
                     }
                 }
 
@@ -651,7 +652,6 @@ public class KafkaReconciler {
                     listeners.put("CONTROLPLANE-9090", "tcp-ctrlplane");
                 }
                 
-                LOGGER.infoOp("Node {}, clusterid {}", node, node.clusterId());
                 listenerFutures.add(
                     networkingProvider.generateAdvertisedListeners(
                         reconciliation, node.podName(), node.clusterId(), listeners
@@ -686,11 +686,9 @@ public class KafkaReconciler {
             .compose(res -> {
                 Map<Integer, String> customAdvertisedListeners = res.resultAt(0);
 
-                LOGGER.infoOp("Custom advertised listners future result {}", customAdvertisedListeners);
-
                 for (NodeRef node : kafka.brokerNodes()) {
                     for (GenericKafkaListener listener : kafka.getListeners()) {
-                        if (!listener.getType().equals("internal"))
+                        if (listener.getType() != KafkaListenerType.INTERNAL)
                             customAdvertisedListeners.put(
                                 node.nodeId(), 
                                 customAdvertisedListeners.get(
@@ -714,9 +712,6 @@ public class KafkaReconciler {
                         );
                     }
                 }
-
-                LOGGER.infoOp("Custom advertised listners after adding internal listeners {}", customAdvertisedListeners);
-
 
                 String customQuorumVoters = res.resultAt(1);
 
@@ -951,7 +946,7 @@ public class KafkaReconciler {
             .compose(i -> initClientAuthenticationCertificates())
             .compose(i -> stretchGarbageCollectorConfigMap()) // Create garbage collector ConfigMap in remote clusters FIRST
             .compose(i -> manualPodCleaning())
-            .compose(i -> networkPolicy())
+            //.compose(i -> networkPolicy())  --> 
             .compose(i -> updateKafkaAutoRebalanceStatus(kafkaStatus))
             .compose(i -> stretchManualRollingUpdate())
             .compose(i -> stretchPvcs(kafkaStatus))
@@ -2447,7 +2442,7 @@ public class KafkaReconciler {
                     allowReconfiguration,
                     eventsPublisher
                 )
-                .withStretch(targetClusterId)
+                .withStretch(targetClusterId, networkingProvider)
                 .rollingRestart(podNeedsRestart);
     }
 

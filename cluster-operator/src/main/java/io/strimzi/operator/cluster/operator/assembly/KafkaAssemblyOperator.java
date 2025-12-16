@@ -738,7 +738,8 @@ public class KafkaAssemblyOperator extends AbstractAssemblyOperator<KubernetesCl
                     remoteConfigMapOp,
                     clusterCa,
                     clientsCa,
-                    targetClusterId
+                    targetClusterId,
+                    io.strimzi.operator.cluster.model.DnsNameGenerator.getStretchProvider()
                 );
 
                 futures.add(

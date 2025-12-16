@@ -21,6 +21,7 @@ import io.strimzi.operator.cluster.model.RestartReasons;
 import io.strimzi.operator.cluster.operator.VertxUtil;
 import io.strimzi.operator.cluster.operator.resource.events.KubernetesRestartEventPublisher;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.BackOff;
 import io.strimzi.operator.common.Reconciliation;
@@ -137,6 +138,7 @@ public class KafkaRoller {
 
     private boolean isStretchMode = false;
     private String targetClusterId;
+    private StretchNetworkingProvider stretchNetworkingProvider;
 
     /**
      * Constructor
@@ -183,12 +185,14 @@ public class KafkaRoller {
 
     /**
      * Initializes brokerAdminClient, if it has not been initialized yet
-     * @param targetClusterId test
+     * @param targetClusterId target cluster id for stretch clusters
+     * @param stretchNetworkingProvider networking provider for stretch clusters
      * @return true if the creation of AC succeeded, false otherwise
      */
-    public KafkaRoller withStretch(String targetClusterId) {
+    public KafkaRoller withStretch(String targetClusterId, StretchNetworkingProvider stretchNetworkingProvider) {
         this.isStretchMode = true;
         this.targetClusterId = targetClusterId;
+        this.stretchNetworkingProvider = stretchNetworkingProvider;
         return this;
     }
 
@@ -882,12 +886,13 @@ public class KafkaRoller {
             bootstrapHostnames = String.format("%s:%s", DnsNameGenerator.of(namespace, KafkaResources.bootstrapServiceName(cluster)).serviceDnsName(), KafkaCluster.REPLICATION_PORT);
         } else {
             if (isStretchMode)
-                bootstrapHostnames = nodes.stream().map(node -> DnsNameGenerator.podDnsNameWithClusterId(node.clusterId(), namespace, KafkaResources.brokersServiceName(cluster), node.podName()) + ":" + KafkaCluster.REPLICATION_PORT).collect(Collectors.joining(","));
+                bootstrapHostnames = nodes.stream().map(node -> stretchNetworkingProvider.discoverPodEndpoint(namespace, node.podName(), node.clusterId(), "tcp-replication").result()).collect(Collectors.joining(","));
             else
                 bootstrapHostnames = nodes.stream().map(node -> DnsNameGenerator.podDnsName(namespace, KafkaResources.brokersServiceName(cluster), node.podName()) + ":" + KafkaCluster.REPLICATION_PORT).collect(Collectors.joining(","));
         }
 
         try {
+            LOGGER.infoOp("CREATING BROKER ADMIN CLIENT FOR {}, stretch mode {}, nodes.isEmpty() {}", bootstrapHostnames, isStretchMode, nodes.isEmpty());
             LOGGER.debugCr(reconciliation, "Creating AdminClient for {}", bootstrapHostnames);
             return adminClientProvider.createAdminClient(bootstrapHostnames, coTlsPemIdentity.pemTrustSet(), coTlsPemIdentity.pemAuthIdentity());
         } catch (KafkaException e) {
