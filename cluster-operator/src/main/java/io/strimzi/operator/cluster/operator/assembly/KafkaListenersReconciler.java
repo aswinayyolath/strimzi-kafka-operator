@@ -633,7 +633,7 @@ public class KafkaListenersReconciler {
                         KafkaResources.brokersServiceName(reconciliation.name()),
                         node.podName(),
                         node.clusterId()
-                    );
+                    ).result();
                 } else if (useServiceDnsDomain) {
                     brokerAddress = DnsNameGenerator.podDnsNameWithClusterDomain(reconciliation.namespace(), KafkaResources.brokersServiceName(reconciliation.name()), node.podName());
                 } else {

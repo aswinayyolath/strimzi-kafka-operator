@@ -1453,7 +1453,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @return  The generated Secrets containing Kafka node certificates
      */
     public List<Secret> generateCertificatesSecrets(ClusterCa clusterCa, ClientsCa clientsCa, List<Secret> existingSecrets, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied) {
-        return generateCertificatesSecrets(clusterCa, clientsCa, existingSecrets, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, null);
+        return generateCertificatesSecrets(clusterCa, clientsCa, existingSecrets, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, null, null);
     }
 
     /**
@@ -1467,10 +1467,11 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
      * @param externalDnsNames                      Map with broker DNS names  which should be added to the certificate
      * @param isMaintenanceTimeWindowsSatisfied     Indicates whether we are in a maintenance window or not
      * @param targetClusterId                       Cluster Id of the cluster that the secrets are to be generated
+     * @param stretchNetworkingProvider                       Cluster Id of the cluster that the secrets are to be generated
      *
      * @return  The generated Secrets containing Kafka node certificates
      */
-    public List<Secret> generateCertificatesSecrets(ClusterCa clusterCa, ClientsCa clientsCa, List<Secret> existingSecrets, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied, String targetClusterId) {
+    public List<Secret> generateCertificatesSecrets(ClusterCa clusterCa, ClientsCa clientsCa, List<Secret> existingSecrets, Set<String> externalBootstrapDnsName, Map<Integer, Set<String>> externalDnsNames, boolean isMaintenanceTimeWindowsSatisfied, String targetClusterId, StretchNetworkingProvider stretchNetworkingProvider) {
         Map<String, Secret> existingSecretWithName = existingSecrets.stream().collect(Collectors.toMap(secret -> secret.getMetadata().getName(), secret -> secret));
         Set<NodeRef> nodes = nodes();
         Map<String, CertAndKey> existingCerts = new HashMap<>();
@@ -1493,7 +1494,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         Map<String, CertAndKey> updatedCerts;
         try {
             updatedCerts = clusterCa.generateBrokerCerts(namespace, cluster, existingCerts,
-                    nodes, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, targetClusterId);
+                    nodes, externalBootstrapDnsName, externalDnsNames, isMaintenanceTimeWindowsSatisfied, targetClusterId, stretchNetworkingProvider);
         } catch (IOException e) {
             LOGGER.warnCr(reconciliation, "Error while generating certificates", e);
             throw new RuntimeException("Failed to prepare Kafka certificates", e);
@@ -2079,8 +2080,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
     private String generatePerBrokerConfiguration(NodeRef node, KafkaPool pool, Map<Integer, Map<String, String>> advertisedHostnames, Map<Integer, Map<String, String>> advertisedPorts, String customControllerQuorumVoters, String customAdvertisedListeners)   {
         KafkaBrokerConfigurationBuilder builder = new KafkaBrokerConfigurationBuilder(reconciliation, node)
                 .withStretch(isStretchMode)
-                .withRackId(rack)
-                .withKRaft(cluster, namespace, nodes());
+                .withRackId(rack);
+                
 
         // If stretch mode is enabled and we have a networking provider, set it on the builder
         if (isStretchMode && stretchNetworkingProvider != null) {
@@ -2088,6 +2089,8 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         if (customControllerQuorumVoters != null) {
+            LOGGER.infoOp("CUSTOM CONTROLLER QUORUM VOTERS AT KAFKA CLUSTER {}", customControllerQuorumVoters);
+
             builder.withCustomControllerQuorumVoters(customControllerQuorumVoters);
         }
 
@@ -2096,6 +2099,7 @@ public class KafkaCluster extends AbstractModel implements SupportsMetrics, Supp
         }
 
         return builder
+                .withKRaft(cluster, namespace, nodes())
                 .withKRaftMetadataLogDir(VolumeUtils.kraftMetadataPath(pool.storage))
                 .withLogDirs(VolumeUtils.createVolumeMounts(pool.storage, false))
                 .withListeners(cluster,

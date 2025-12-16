@@ -170,7 +170,8 @@ public class ClusterCa extends Ca {
             Set<String> externalBootstrapAddresses,
             Map<Integer, Set<String>> externalAddresses,
             boolean isMaintenanceTimeWindowsSatisfied,
-            String targetClusterId
+            String targetClusterId,
+            io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider stretchNetworkingProvider
     ) throws IOException {
         Function<NodeRef, Subject> subjectFn = node -> {
             Subject.Builder subject = new Subject.Builder()
@@ -178,9 +179,22 @@ public class ClusterCa extends Ca {
                     .withCommonName(KafkaResources.kafkaComponentName(clusterName));
 
             if (targetClusterId != null) {
+                String podDnsName = stretchNetworkingProvider.generatePodDnsName(namespace, KafkaResources.brokersServiceName(clusterName), node.podName(), targetClusterId).result();
+
+                LOGGER.infoOp("Bootstrap Service Address: {}", ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.bootstrapServiceName(clusterName)));
+                LOGGER.infoOp("Broker Service Address: {}", ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(clusterName)));
                 subject.addDnsNames(ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.bootstrapServiceName(clusterName)));
                 subject.addDnsNames(ModelUtils.generateAllServiceDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(clusterName)));
-                subject.addDnsName(DnsNameGenerator.podDnsNameWithClusterId(targetClusterId, namespace, KafkaResources.brokersServiceName(clusterName), node.podName()));
+                
+                if (IpAndDnsValidation.isValidIpAddress(podDnsName)) {
+                    LOGGER.infoOp("VALID IP : {}", podDnsName);
+
+                    subject.addIpAddress(podDnsName);
+                } else {
+                    LOGGER.infoOp("VALID SANS: {}", podDnsName);
+
+                    subject.addDnsName(podDnsName);
+                }
             }
 
             subject.addDnsNames(ModelUtils.generateAllServiceDnsNames(namespace, KafkaResources.bootstrapServiceName(clusterName)));

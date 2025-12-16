@@ -110,7 +110,7 @@ public class DnsNameGenerator {
      */
     public String podDnsName(String podName) {
         if (stretchProvider != null && clusterId != null) {
-            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId);
+            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId).result();
         }
         return String.format("%s.%s",
                 podName,
@@ -143,7 +143,7 @@ public class DnsNameGenerator {
      */
     public static String podDnsNameWithClusterId(String clusterId, String namespace, String serviceName, String podName) {
         if (stretchProvider != null) {
-            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId);
+            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId).result();
         }
         return DnsNameGenerator.of(clusterId, namespace, serviceName)
                 .podDnsName(podName);
@@ -204,7 +204,7 @@ public class DnsNameGenerator {
      */
     public static String podDnsNameWithClusterDomainAndClusterId(String clusterId, String namespace, String serviceName, String podName) {
         if (stretchProvider != null) {
-            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId);
+            return stretchProvider.generatePodDnsName(namespace, serviceName, podName, clusterId).result();
         }
         return DnsNameGenerator.of(clusterId, namespace, serviceName)
                 .podDnsName(podName);
@@ -220,7 +220,7 @@ public class DnsNameGenerator {
      */
     public String serviceDnsName() {
         if (stretchProvider != null && clusterId != null) {
-            return stretchProvider.generateServiceDnsName(namespace, serviceName, clusterId);
+            return stretchProvider.generateServiceDnsName(namespace, serviceName, clusterId).result();
         }
         return String.format("%s.%s.svc.%s",
                 serviceName,

@@ -36,6 +36,7 @@ import io.strimzi.operator.cluster.operator.resource.kubernetes.DeploymentOperat
 import io.strimzi.operator.cluster.operator.resource.kubernetes.PodOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.SecretOperator;
 import io.strimzi.operator.cluster.operator.resource.kubernetes.StrimziPodSetOperator;
+import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
 import io.strimzi.operator.common.AdminClientProvider;
 import io.strimzi.operator.common.Annotations;
 import io.strimzi.operator.common.BackOff;
@@ -115,6 +116,7 @@ public class CaReconciler {
     PodOperator remotePodOperator;
     ConfigMapOperator remoteConfigMapOperator;
     OwnerReference gcOwnerRef; // GC ConfigMap owner reference for remote cluster secrets only
+    StretchNetworkingProvider stretchNetworkingProvider;
 
     /**
      * Constructs the CA reconciler which reconciles the Cluster and Client CAs
@@ -184,9 +186,10 @@ public class CaReconciler {
      * @param clusterCa                 The Cluster CA of the kafka cluster, created at the central cluster
      * @param clientsCa                 The Client CA of the kafka cluster, created at the central cluster
      * @param targetClusterId           The target cluster Id where the certs are to be reconciled
+     * @param stretchNetworkingProvider The networking provider configured for stretc
      * @return The same CaReconciler object, updated with the stretch configuration.
      */
-    public CaReconciler withStretchConfig(SecretOperator remoteSecretOperator, StrimziPodSetOperator remotePodSetOperator, PodOperator remotePodOperator, ConfigMapOperator remoteConfigMapOperator, ClusterCa clusterCa, ClientsCa clientsCa, String targetClusterId) {
+    public CaReconciler withStretchConfig(SecretOperator remoteSecretOperator, StrimziPodSetOperator remotePodSetOperator, PodOperator remotePodOperator, ConfigMapOperator remoteConfigMapOperator, ClusterCa clusterCa, ClientsCa clientsCa, String targetClusterId, StretchNetworkingProvider stretchNetworkingProvider) {
         this.remoteSecretOperator = remoteSecretOperator;
         this.remotePodSetOperator = remotePodSetOperator;
         this.remotePodOperator = remotePodOperator;
@@ -195,6 +198,7 @@ public class CaReconciler {
         this.clusterCa = clusterCa;
         this.clientsCa = clientsCa;
         this.targetClusterId = targetClusterId;
+        this.stretchNetworkingProvider = stretchNetworkingProvider;
         
         // Try to fetch GC ConfigMap UID and set as owner reference for remote cluster secrets
         String gcConfigMapName = KafkaResources.kafkaComponentName(reconciliation.name()) + "-gc";
@@ -644,7 +648,7 @@ public class CaReconciler {
                 null,
                 false,
                 eventPublisher)
-                .withStretch(targetClusterId);
+                .withStretch(targetClusterId, stretchNetworkingProvider);
     }
 
     /**

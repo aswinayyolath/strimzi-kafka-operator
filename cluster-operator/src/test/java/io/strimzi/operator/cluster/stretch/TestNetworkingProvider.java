@@ -65,7 +65,6 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     @Override
     public Future<List<HasMetadata>> createNetworkingResources(
             Reconciliation reconciliation,
-            String namespace,
             String podName,
             String clusterId,
             Map<String, Integer> ports) {
@@ -75,7 +74,7 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
         }
         
         LOGGER.info("Creating networking resources for pod {} in namespace {} on cluster {}", 
-                   podName, namespace, clusterId);
+                   podName, reconciliation.namespace(), clusterId);
         
         List<HasMetadata> resources = new ArrayList<>();
         
@@ -83,7 +82,7 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
         Service service = new ServiceBuilder()
             .withNewMetadata()
                 .withName(podName + "-test-svc")
-                .withNamespace(namespace)
+                .withNamespace(reconciliation.namespace())
                 .addToLabels("app", "kafka")
                 .addToLabels("strimzi.io/cluster", podName.substring(0, podName.lastIndexOf("-kafka-")))
                 .addToLabels("test-provider", "true")
@@ -109,7 +108,6 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     
     @Override
     public Future<String> discoverPodEndpoint(
-            Reconciliation reconciliation,
             String namespace,
             String serviceName,
             String clusterId,
@@ -127,22 +125,22 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     }
     
     @Override
-    public String generateServiceDnsName(String namespace, String serviceName, String clusterId) {
-        return String.format("%s.%s.svc.cluster.local", serviceName, namespace);
+    public Future<String> generateServiceDnsName(String namespace, String serviceName, String clusterId) {
+        return Future.succeededFuture(String.format("%s.%s.svc.cluster.local", serviceName, namespace));
     }
     
     @Override
-    public String generatePodDnsName(String namespace, String serviceName, String podName, String clusterId) {
-        return String.format("%s.%s.%s.svc.cluster.local", podName, serviceName, namespace);
+    public Future<String> generatePodDnsName(String namespace, String serviceName, String podName, String clusterId) {
+        return Future.succeededFuture(String.format("%s.%s.%s.svc.cluster.local", podName, serviceName, namespace));
     }
     
     @Override
     public Future<String> generateAdvertisedListeners(
             Reconciliation reconciliation,
-            String namespace,
             String podName,
             String clusterId,
-            Map<String, String> listeners) {
+            Map<String, String> listeners
+    ) {
         
         if (!initialized) {
             return Future.failedFuture(new IllegalStateException("Provider not initialized"));
@@ -153,7 +151,7 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
             .map(e -> {
                 String listenerName = e.getKey();
                 String portName = e.getValue();
-                String dnsName = generatePodDnsName(namespace, podName + "-svc", podName, clusterId);
+                String dnsName = generatePodDnsName(reconciliation.namespace(), podName + "-svc", podName, clusterId).result();
                 return String.format("%s://%s:9091", listenerName, dnsName);
             })
             .collect(Collectors.joining(","));
@@ -165,7 +163,6 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     @Override
     public Future<String> generateQuorumVoters(
             Reconciliation reconciliation,
-            String namespace,
             List<ControllerPodInfo> controllerPods,
             String replicationPortName) {
         
@@ -176,7 +173,7 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
         // Generate quorum voters in KRaft format
         String quorumVoters = controllerPods.stream()
             .map(pod -> {
-                String dnsName = generatePodDnsName(namespace, pod.podName() + "-svc", pod.podName(), pod.clusterId());
+                String dnsName = generatePodDnsName(reconciliation.namespace(), pod.podName() + "-svc", pod.podName(), pod.clusterId()).result();
                 return String.format("%d@%s:9091", pod.nodeId(), dnsName);
             })
             .collect(Collectors.joining(","));
@@ -188,7 +185,6 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
     @Override
     public Future<Void> deleteNetworkingResources(
             Reconciliation reconciliation,
-            String namespace,
             String podName,
             String clusterId) {
         
@@ -197,7 +193,7 @@ public class TestNetworkingProvider implements StretchNetworkingProvider {
         }
         
         LOGGER.info("Deleting networking resources for pod {} in namespace {} on cluster {}", 
-                   podName, namespace, clusterId);
+                   podName, reconciliation.namespace(), clusterId);
         
         // In a real implementation, we would delete the service here
         // For testing, we just log and succeed
